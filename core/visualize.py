@@ -9,12 +9,20 @@ Provides functions for:
 import matplotlib
 matplotlib.use("Agg")  # Headless rendering
 
+import io
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 from pathlib import Path
 import matplotlib.pyplot as plt
 import imageio
+
+try:
+    import cartopy.crs as ccrs
+    import cartopy.feature as cfeature
+    HAS_CARTOPY = True
+except ImportError:
+    HAS_CARTOPY = False
 
 
 def _get_font(size=12):
@@ -144,8 +152,50 @@ def add_location_marker(img, center_x, center_y, color=(0, 255, 255, 255), size=
     return result
 
 
+def reproject_geostationary(satellite_image, sat_lon, center_lat, center_lon,
+                            bbox_deg=20.0, output_size=(800, 600)):
+    """Reproject geostationary satellite image onto a flat map with coastlines.
+
+    Takes raw geostationary crop and renders it on a PlateCarree map so it
+    looks like a normal overhead view regardless of satellite viewing angle.
+    """
+    if not HAS_CARTOPY:
+        return satellite_image
+
+    img_array = np.array(satellite_image.convert("RGBA"))
+    half = bbox_deg / 2
+
+    geo_crs = ccrs.Geostationary(central_longitude=sat_lon, satellite_height=35786000)
+    map_crs = ccrs.PlateCarree()
+
+    fig = plt.figure(figsize=(output_size[0] / 100, output_size[1] / 100), dpi=100)
+    ax = fig.add_axes([0, 0, 1, 1], projection=map_crs)
+    ax.set_extent([center_lon - half, center_lon + half,
+                   center_lat - half, center_lat + half], crs=map_crs)
+
+    ax.imshow(img_array, origin='upper', transform=geo_crs,
+              extent=geo_crs.x_limits + geo_crs.y_limits,
+              interpolation='bilinear')
+
+    ax.coastlines(resolution='50m', color='cyan', linewidth=0.8, alpha=0.7)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5)
+    ax.add_feature(cfeature.LAKES, facecolor='none', edgecolor='cyan', linewidth=0.3, alpha=0.4)
+
+    # Target location marker
+    ax.plot(center_lon, center_lat, '+', color='yellow', markersize=12,
+            markeredgewidth=2, transform=map_crs, zorder=10)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
+                facecolor='black', edgecolor='none')
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf).convert("RGBA")
+
+
 def compose_frame(satellite_image, timestamp, satellite_name, location_str,
-                  center_x=None, center_y=None):
+                  center_x=None, center_y=None, sat_lon=None, center_lat=None,
+                  center_lon=None, bbox_deg=20.0):
     """Compose all layers into a single frame.
 
     This is the central compositing pipeline for timelapse generation.
@@ -165,17 +215,20 @@ def compose_frame(satellite_image, timestamp, satellite_name, location_str,
     Returns:
         PIL Image (RGBA) - fully composited frame
     """
-    # Ensure we're working with RGBA
-    if satellite_image.mode != "RGBA":
-        frame = satellite_image.convert("RGBA")
+    # Layer 1: Reproject if we have satellite coordinates
+    if sat_lon is not None and center_lat is not None and center_lon is not None and HAS_CARTOPY:
+        frame = reproject_geostationary(
+            satellite_image, sat_lon, center_lat, center_lon,
+            bbox_deg=bbox_deg, output_size=(900, 700))
     else:
-        frame = satellite_image.copy()
+        if satellite_image.mode != "RGBA":
+            frame = satellite_image.convert("RGBA")
+        else:
+            frame = satellite_image.copy()
+        if center_x is not None and center_y is not None:
+            frame = add_location_marker(frame, center_x, center_y)
 
-    # Layer 2: Add location marker if coordinates provided
-    if center_x is not None and center_y is not None:
-        frame = add_location_marker(frame, center_x, center_y)
-
-    # Layer 3: Add timestamp label (always)
+    # Final layer: timestamp label
     frame = add_timestamp_label(frame, timestamp, satellite_name, location_str)
 
     return frame

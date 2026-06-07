@@ -122,8 +122,10 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                     timestamp=ts_fmt,
                     satellite_name=satellite["name"],
                     location_str=display,
-                    center_x=frame["image"].width // 2,
-                    center_y=frame["image"].height // 2,
+                    sat_lon=satellite["lon"],
+                    center_lat=lat,
+                    center_lon=lon,
+                    bbox_deg=20.0,
                 )
                 composed.append(img)
                 labels.append(ts_fmt)
