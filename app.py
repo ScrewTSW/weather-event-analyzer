@@ -180,7 +180,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
             with gr.Column(scale=2):
                 sat_image = gr.Image(label="Satellite Imagery", type="pil", height=550)
-                time_slider = gr.Slider(minimum=0, maximum=0, step=1, value=0, label="Time")
+                time_slider = gr.Slider(minimum=0, maximum=1, step=1, value=0, label="Time")
 
         with gr.Row():
             cape_plot = gr.Plot(label="CAPE / CIN")
