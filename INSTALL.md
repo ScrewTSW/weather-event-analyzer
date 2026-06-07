@@ -3,7 +3,8 @@
 ## Python Dependencies
 
 ```bash
-pip install -r requirements.txt
+python -m ensurepip --upgrade
+python -m pip install -r requirements.txt
 ```
 
 ### What each dependency does
