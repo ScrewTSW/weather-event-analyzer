@@ -30,6 +30,28 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             log_lines.append(msg)
 
         try:
+            if not location_str or not location_str.strip():
+                return [], None, None, None, "", "ERROR: Enter a location", []
+
+            from datetime import datetime, timedelta
+            try:
+                from datetime import UTC
+                now = datetime.now(UTC).replace(tzinfo=None)
+            except ImportError:
+                now = datetime.utcnow()
+
+            if not date or not date.strip():
+                date = now.strftime("%Y-%m-%d")
+                log(f"Using today: {date}")
+
+            if not start_utc or not start_utc.strip():
+                two_hours_ago = now - timedelta(hours=2)
+                start_utc = two_hours_ago.strftime("%H:%M")
+                log(f"Start defaulted to 2h ago: {start_utc} UTC")
+            if not end_utc or not end_utc.strip():
+                end_utc = now.strftime("%H:%M")
+                log(f"End defaulted to now: {end_utc} UTC")
+
             lat, lon, display, satellite = resolve_location(location_str)
             state["lat"] = lat
             state["lon"] = lon
@@ -37,14 +59,17 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             log(f"Location: {display}")
             log(f"Satellite: {satellite['name']} ({satellite['slider_id']})")
 
-            # Fetch satellite imagery
-            date_compact = date.replace("-", "")
+            date_compact = date.strip().replace("-", "")
+            start_clean = start_utc.replace(":", "")
+            end_clean = end_utc.replace(":", "")
+            log(f"Time range: {start_clean}-{end_clean} UTC on {date_compact}")
+
             frames = sat_client.fetch_event(
                 satellite=satellite,
                 product=product,
                 date=date_compact,
-                start_utc=start_utc.replace(":", ""),
-                end_utc=end_utc.replace(":", ""),
+                start_utc=start_clean,
+                end_utc=end_clean,
                 lat=lat, lon=lon,
                 zoom=int(zoom),
                 on_progress=log,
@@ -60,8 +85,8 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
             # Fetch alerts for the event time window
             log("Fetching severe weather alerts...")
-            start_h = int(start_utc.replace(":", ""))
-            end_h = int(end_utc.replace(":", ""))
+            start_h = int(start_clean) if start_clean else 0
+            end_h = int(end_clean) if end_clean else 2359
             mid_h = str((start_h + end_h) // 2).zfill(4)
             alert_time = f"{date}T{mid_h[:2]}:{mid_h[2:]}:00"
             alerts = fetch_alerts(lat, lon, alert_time)
