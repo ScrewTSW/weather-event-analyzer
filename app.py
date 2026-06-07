@@ -10,7 +10,53 @@ from core.location import resolve_location
 from core.satellite import SatelliteClient
 from core.atmosphere import OpenMeteoClient
 from core.alerts import fetch_alerts
-from core.visualize import compose_frame, create_atmosphere_chart, create_timelapse_gif, create_timeline_bar
+from core.visualize import compose_frame, create_atmosphere_chart, create_timelapse_gif
+
+
+def _build_timeline_html(labels, current_idx=0):
+    if not labels:
+        return "<div style='height:50px'></div>"
+    n = len(labels)
+    notches = []
+    for i, ts in enumerate(labels):
+        parts = ts.replace(" UTC", "").split(" ")
+        time_part = parts[-1] if len(parts) > 1 else ts
+        date_parts = parts[0].split("-") if parts else []
+        short_date = f"{date_parts[1]}/{date_parts[2]}" if len(date_parts) == 3 else ""
+        is_cur = (i == current_idx)
+        color = "#FFD700" if is_cur else "#888"
+        weight = "bold" if is_cur else "normal"
+        date_html = f"<div style='font-size:9px;color:#555'>{short_date}</div>" if (is_cur or i == 0) else ""
+        notches.append(f"""<div style='flex:1;text-align:center;cursor:pointer' onclick="
+            document.getElementById('wea-slider').value={i};
+            document.getElementById('wea-slider').dispatchEvent(new Event('input'));
+        ">
+            {date_html}
+            <div style='font-size:11px;color:{color};font-weight:{weight}'>{time_part}</div>
+            <div style='width:2px;height:{"16" if is_cur else "10"}px;background:{color};margin:2px auto'></div>
+        </div>""")
+
+    slider_html = f"""<input type='range' id='wea-slider' min='0' max='{n-1}' value='{current_idx}' step='1'
+        style='width:100%;margin:0;accent-color:#FFD700;cursor:pointer'
+        oninput="
+            let v=parseInt(this.value);
+            let el=document.querySelector('input[data-testid=\\'number-input\\']');
+            if(el){{el.value=v;el.dispatchEvent(new Event('input',{{bubbles:true}}))}}
+        ">"""
+
+    return f"""<div style='background:#1a1a2e;border-radius:8px;padding:8px 12px;margin:4px 0'>
+        <div style='display:flex;align-items:flex-end'>{chr(10).join(notches)}</div>
+        <div style='height:1px;background:#444;margin:0 0 4px 0'></div>
+        {slider_html}
+    </div>
+    <script>
+    document.addEventListener('keydown',function(e){{
+        let s=document.getElementById('wea-slider');
+        if(!s)return;
+        if(e.key==='ArrowLeft'){{s.value=Math.max(0,parseInt(s.value)-1);s.dispatchEvent(new Event('input'))}}
+        if(e.key==='ArrowRight'){{s.value=Math.min({n-1},parseInt(s.value)+1);s.dispatchEvent(new Event('input'))}}
+    }});
+    </script>"""
 
 
 def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
@@ -151,29 +197,24 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             info = f"{display}\n{satellite['name']} ({satellite['slider_id']})"
 
             first_img = composed[0] if composed else None
-            n_frames = max(1, len(composed))
-            slider_max = n_frames - 1 if n_frames > 1 else 1
-            first_ts = labels[0] if labels else ""
-            timeline = create_timeline_bar(labels, current_idx=0)
+            tl_html = _build_timeline_html(labels, current_idx=0)
 
-            return (first_img, gr.Slider(minimum=0, maximum=slider_max, value=0, step=1, label="Frame"),
-                    timeline, first_ts, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data)
+            return (first_img, tl_html, 0, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data)
 
         except Exception as e:
             import traceback
             log_lines.append(f"ERROR: {e}")
             log_lines.append(traceback.format_exc())
-            return (None, gr.Slider(minimum=0, maximum=1, value=0, step=1, label="Frame"),
-                    None, "", None, None, None, "", "\n".join(log_lines), [])
+            return (None, "<div style='height:50px'></div>", 0, None, None, None, "", "\n".join(log_lines), [])
 
-    def update_frame(frame_idx):
-        idx = int(frame_idx)
+    def update_frame(idx):
+        idx = int(idx)
         frames = state["composed_frames"]
         labels = state["frame_labels"]
         if not frames or idx >= len(frames):
-            return None, None, ""
-        timeline = create_timeline_bar(labels, current_idx=idx)
-        return frames[idx], timeline, labels[idx]
+            return None, "<div style='height:50px'></div>"
+        tl_html = _build_timeline_html(labels, current_idx=idx)
+        return frames[idx], tl_html
 
     with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
@@ -196,10 +237,8 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
             with gr.Column(scale=2):
                 sat_image = gr.Image(label="Satellite Imagery", type="pil", height=500)
-                timeline_plot = gr.Plot(label=None, show_label=False)
-                with gr.Row():
-                    time_slider = gr.Slider(minimum=0, maximum=1, step=1, value=0, label="Frame", scale=4)
-                    time_label = gr.Textbox(label="Timestamp", interactive=False, scale=1)
+                timeline_html = gr.HTML(value="<div style='height:50px'></div>")
+                frame_idx = gr.Number(value=0, visible=False, precision=0)
 
         with gr.Row():
             cape_plot = gr.Plot(label="CAPE / CIN")
@@ -217,13 +256,13 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
         fetch_btn.click(
             fn=fetch_data,
             inputs=[location_input, date_input, start_input, end_input, zoom_slider, product_dropdown],
-            outputs=[sat_image, time_slider, timeline_plot, time_label, cape_plot, temp_plot, wind_plot, resolved_info, status_log, alerts_table],
+            outputs=[sat_image, timeline_html, frame_idx, cape_plot, temp_plot, wind_plot, resolved_info, status_log, alerts_table],
         )
 
-        time_slider.change(
+        frame_idx.change(
             fn=update_frame,
-            inputs=[time_slider],
-            outputs=[sat_image, timeline_plot, time_label],
+            inputs=[frame_idx],
+            outputs=[sat_image, timeline_html],
         )
 
     return app
