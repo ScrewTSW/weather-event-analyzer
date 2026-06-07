@@ -152,56 +152,48 @@ def add_location_marker(img, center_x, center_y, color=(0, 255, 255, 255), size=
     return result
 
 
-def _tile_extent_to_geo(tile_bounds, zoom, sat_height=35786000):
-    """Convert tile bounds to geostationary projection coordinates (meters).
-
-    The full disk at a given zoom level is TILE_SIZE * 2^zoom pixels.
-    In geostationary CRS, the full disk spans from -max_x to +max_x.
-    max_x = sat_height * tan(asin(R_eq / (R_eq + sat_height)))
-    which is approximately sat_height * sin(angular_radius).
-    """
-    from core.projection import TILE_SIZE
-    R_EQ = 6378137.0  # meters
-    full_extent = sat_height * np.sin(np.arcsin(R_EQ / (R_EQ + sat_height)))
-
-    image_size = TILE_SIZE * (2 ** zoom)
-    min_tx, min_ty, max_tx, max_ty = tile_bounds
-
-    # Pixel ranges in full-disk space
-    px_left = min_tx * TILE_SIZE
-    px_right = (max_tx + 1) * TILE_SIZE
-    px_top = min_ty * TILE_SIZE
-    px_bottom = (max_ty + 1) * TILE_SIZE
-
-    # Map pixels to geostationary coordinates
-    # full_extent covers half the image (center to edge)
-    # The disk center is at image_size/2
-    center = image_size / 2.0
-    scale = full_extent / (center * 0.45)  # match fill_fraction from projection.py
-
-    geo_left = (px_left - center) * scale
-    geo_right = (px_right - center) * scale
-    geo_top = (center - px_top) * scale      # y is flipped
-    geo_bottom = (center - px_bottom) * scale
-
-    return (geo_left, geo_right, geo_bottom, geo_top)
+GIBS_BASE = "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best"
+GIBS_TILE_SIZE = 512
 
 
-def reproject_geostationary(satellite_image, sat_lon, center_lat, center_lon,
-                            bbox_deg=20.0, output_size=(900, 700),
-                            tile_bounds=None, zoom=None):
-    """Reproject geostationary satellite image onto a flat map with coastlines.
+def fetch_gibs_tile(session, layer, date, zoom, row, col, cache=None):
+    """Download a single NASA GIBS tile."""
+    cache_key = f"gibs/{layer}/{date}/{zoom}/{row}_{col}.jpg"
+    if cache:
+        cached = cache.get(cache_key)
+        if cached:
+            return Image.open(cached).convert("RGBA")
 
-    Uses tile_bounds and zoom to compute the exact geostationary extent of the
-    image (which piece of the full disk it represents).
+    url = f"{GIBS_BASE}/{layer}/default/{date}/250m/{zoom}/{row}/{col}.jpg"
+    try:
+        resp = session.get(url, timeout=15)
+        if resp.status_code == 200 and len(resp.content) > 1000:
+            if cache:
+                cache.store(cache_key, resp.content, source_url=url)
+            return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+    except Exception:
+        pass
+    return None
+
+
+def render_map_view(center_lat, center_lon, bbox_deg=20.0, date=None,
+                    output_size=(900, 700), cache=None):
+    """Render a flat map view with NASA GIBS satellite imagery + coastlines.
+
+    Uses MODIS/VIIRS pre-projected tiles (EPSG:4326) so no reprojection needed.
     """
     if not HAS_CARTOPY:
-        return satellite_image
+        return Image.new("RGBA", output_size, (30, 30, 30, 255))
 
-    img_array = np.array(satellite_image.convert("RGBA"))
+    import requests
+    session = requests.Session()
+    session.headers["User-Agent"] = "WeatherEventAnalyzer/1.0"
+
+    if date is None:
+        from datetime import datetime
+        date = datetime.utcnow().strftime("%Y-%m-%d")
+
     half = bbox_deg / 2
-
-    geo_crs = ccrs.Geostationary(central_longitude=sat_lon, satellite_height=35786000)
     map_crs = ccrs.PlateCarree()
 
     fig = plt.figure(figsize=(output_size[0] / 100, output_size[1] / 100), dpi=100)
@@ -209,25 +201,50 @@ def reproject_geostationary(satellite_image, sat_lon, center_lat, center_lon,
     ax.set_extent([center_lon - half, center_lon + half,
                    center_lat - half, center_lat + half], crs=map_crs)
 
-    # Compute proper geostationary extent from tile coordinates
-    if tile_bounds is not None and zoom is not None:
-        extent = _tile_extent_to_geo(tile_bounds, zoom)
-    else:
-        extent = geo_crs.x_limits + geo_crs.y_limits
+    # Try to fetch GIBS MODIS tiles for this area
+    gibs_zoom = 4  # ~2km/pixel, good for 20-degree bbox
+    if bbox_deg <= 10:
+        gibs_zoom = 5
+    if bbox_deg <= 5:
+        gibs_zoom = 6
 
-    ax.imshow(img_array, origin='upper', transform=geo_crs,
-              extent=extent, interpolation='bilinear')
+    n_tiles_y = 2 ** gibs_zoom
+    n_tiles_x = 2 ** (gibs_zoom + 1)
+    tile_height = 180.0 / n_tiles_y
+    tile_width = 360.0 / n_tiles_x
 
-    ax.coastlines(resolution='50m', color='cyan', linewidth=0.8, alpha=0.7)
-    ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5)
-    ax.add_feature(cfeature.LAKES, facecolor='none', edgecolor='cyan', linewidth=0.3, alpha=0.4)
+    min_row = max(0, int((90 - (center_lat + half)) / tile_height))
+    max_row = min(n_tiles_y - 1, int((90 - (center_lat - half)) / tile_height))
+    min_col = max(0, int((center_lon - half + 180) / tile_width))
+    max_col = min(n_tiles_x - 1, int((center_lon + half + 180) / tile_width))
 
-    ax.plot(center_lon, center_lat, '+', color='yellow', markersize=12,
+    for layer in ["MODIS_Terra_CorrectedReflectance_TrueColor", "VIIRS_SNPP_CorrectedReflectance_TrueColor"]:
+        tiles_ok = 0
+        for row in range(min_row, max_row + 1):
+            for col in range(min_col, max_col + 1):
+                tile_img = fetch_gibs_tile(session, layer, date, gibs_zoom, row, col, cache)
+                if tile_img:
+                    tile_lat_top = 90 - row * tile_height
+                    tile_lat_bot = tile_lat_top - tile_height
+                    tile_lon_left = -180 + col * tile_width
+                    tile_lon_right = tile_lon_left + tile_width
+                    ax.imshow(np.array(tile_img), origin='upper', transform=map_crs,
+                              extent=[tile_lon_left, tile_lon_right, tile_lat_bot, tile_lat_top],
+                              interpolation='bilinear', zorder=1)
+                    tiles_ok += 1
+        if tiles_ok > 0:
+            break  # Got tiles from this layer, don't try fallback
+
+    ax.coastlines(resolution='50m', color='cyan', linewidth=0.8, alpha=0.8, zorder=5)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5, zorder=5)
+    ax.add_feature(cfeature.LAKES, facecolor='none', edgecolor='cyan', linewidth=0.3, alpha=0.4, zorder=5)
+
+    ax.plot(center_lon, center_lat, '+', color='yellow', markersize=14,
             markeredgewidth=2, transform=map_crs, zorder=10)
 
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
-                facecolor='black', edgecolor='none')
+                facecolor='#1a1a2e', edgecolor='none')
     plt.close(fig)
     buf.seek(0)
     return Image.open(buf).convert("RGBA")
@@ -255,11 +272,15 @@ def compose_frame(satellite_image, timestamp, satellite_name, location_str,
     Returns:
         PIL Image (RGBA) - fully composited frame
     """
-    if sat_lon is not None and center_lat is not None and center_lon is not None and HAS_CARTOPY:
-        frame = reproject_geostationary(
-            satellite_image, sat_lon, center_lat, center_lon,
-            bbox_deg=bbox_deg, output_size=(900, 700),
-            tile_bounds=tile_bounds, zoom=zoom)
+    if center_lat is not None and center_lon is not None and HAS_CARTOPY:
+        date_str = None
+        if timestamp:
+            parts = timestamp.replace(" UTC", "").split(" ")
+            if parts:
+                date_str = parts[0]
+        frame = render_map_view(
+            center_lat, center_lon, bbox_deg=bbox_deg,
+            date=date_str, output_size=(900, 700))
     else:
         if satellite_image.mode != "RGBA":
             frame = satellite_image.convert("RGBA")

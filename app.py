@@ -89,10 +89,18 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             for a in alerts:
                 props = a.get("properties", {})
                 intensity_text = props.get("intensity_text", "")
-                if not intensity_text:
-                    intensity_val = props.get("intensity", props.get("f_scale", props.get("speed", props.get("size", ""))))
-                    intensity_unit = props.get("intensity_unit", "")
-                    intensity_text = f"{intensity_val} {intensity_unit}".strip() if intensity_val else ""
+                if not intensity_text or intensity_text.strip() == "Magnitude 0":
+                    intensity_val = props.get("intensity", "")
+                    if intensity_val and float(intensity_val) > 0:
+                        intensity_unit = props.get("intensity_unit", "")
+                        intensity_text = f"{intensity_val} {intensity_unit}".strip()
+                    else:
+                        intensity_text = a["severity"].title()
+                        ev = a.get("event_type", "")
+                        if ev == "flood":
+                            intensity_text = "Active flooding"
+                        elif ev == "drought":
+                            intensity_text = props.get("intensity_text", "Drought conditions")
                 alert_lat = props.get("lat", "")
                 alert_lon = props.get("lon", "")
                 geo = a.get("geometry") or {}
@@ -145,23 +153,25 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             first_img = composed[0] if composed else None
             n_frames = max(1, len(composed))
             slider_max = n_frames - 1 if n_frames > 1 else 1
-            time_label = f"Frame (0-{slider_max}): {labels[0]}" if labels else "Frame"
+            first_ts = labels[0] if labels else ""
 
-            return first_img, gr.Slider(minimum=0, maximum=slider_max, value=0, step=1, label=time_label), cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data
+            return (first_img, gr.Slider(minimum=0, maximum=slider_max, value=0, step=1, label="Frame"),
+                    first_ts, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data)
 
         except Exception as e:
             import traceback
             log_lines.append(f"ERROR: {e}")
             log_lines.append(traceback.format_exc())
-            return None, gr.Slider(minimum=0, maximum=1, value=0, step=1, label="Frame"), None, None, None, "", "\n".join(log_lines), []
+            return (None, gr.Slider(minimum=0, maximum=1, value=0, step=1, label="Frame"),
+                    "", None, None, None, "", "\n".join(log_lines), [])
 
     def update_frame(frame_idx):
         idx = int(frame_idx)
         frames = state["composed_frames"]
         labels = state["frame_labels"]
         if not frames or idx >= len(frames):
-            return None
-        return frames[idx]
+            return None, ""
+        return frames[idx], labels[idx]
 
     with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
@@ -184,7 +194,9 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
             with gr.Column(scale=2):
                 sat_image = gr.Image(label="Satellite Imagery", type="pil", height=550)
-                time_slider = gr.Slider(minimum=0, maximum=1, step=1, value=0, label="Time")
+                with gr.Row():
+                    time_slider = gr.Slider(minimum=0, maximum=1, step=1, value=0, label="Frame", scale=4)
+                    time_label = gr.Textbox(label="Timestamp", interactive=False, scale=1)
 
         with gr.Row():
             cape_plot = gr.Plot(label="CAPE / CIN")
@@ -202,13 +214,13 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
         fetch_btn.click(
             fn=fetch_data,
             inputs=[location_input, date_input, start_input, end_input, zoom_slider, product_dropdown],
-            outputs=[sat_image, time_slider, cape_plot, temp_plot, wind_plot, resolved_info, status_log, alerts_table],
+            outputs=[sat_image, time_slider, time_label, cape_plot, temp_plot, wind_plot, resolved_info, status_log, alerts_table],
         )
 
         time_slider.change(
             fn=update_frame,
             inputs=[time_slider],
-            outputs=[sat_image],
+            outputs=[sat_image, time_label],
         )
 
     return app
