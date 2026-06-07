@@ -62,3 +62,47 @@ python main.py satellite --location "Harbin, China" --date 2026-05-31 --start 07
 # CLI — atmosphere data
 python main.py atmosphere --lat 45.75 --lon 126.65 --date 2026-05-31
 ```
+
+## Run as systemd service (auto-start at boot)
+
+This makes the web UI available on your local network at `http://<your-ip>:7860`.
+
+**1. Edit the service file** to match your setup:
+
+```bash
+# Review and adjust paths/user if needed
+nano weather-event-analyzer.service
+```
+
+The default service file assumes:
+- User: `USERNAME`
+- Project path: `APPLICATION_DIRECTORY`
+- Python at `/usr/bin/python`
+- Port 7860
+
+**2. Install and enable the service:**
+
+```bash
+sudo cp weather-event-analyzer.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable weather-event-analyzer
+sudo systemctl start weather-event-analyzer
+```
+
+**3. Open the firewall port (if firewalld is active):**
+
+```bash
+sudo firewall-cmd --add-port=7860/tcp --permanent
+sudo firewall-cmd --reload
+```
+
+**4. Check status:**
+
+```bash
+sudo systemctl status weather-event-analyzer
+journalctl -u weather-event-analyzer -f   # follow logs
+```
+
+**5. Access from other devices on your network:**
+
+Open `http://<server-ip>:7860` in a browser. Find your IP with `ip addr show`.

@@ -1,0 +1,16 @@
+[Unit]
+Description=Weather Event Analyzer Web UI
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=USERNAME
+WorkingDirectory=APPLICATION_DIRECTORY
+ExecStart=/usr/bin/python APPLICATION_DIRECTORY/main.py --web --port 7860
+Restart=on-failure
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
