@@ -10,7 +10,7 @@ from core.location import resolve_location
 from core.satellite import SatelliteClient
 from core.atmosphere import OpenMeteoClient
 from core.alerts import fetch_alerts
-from core.visualize import compose_frame, create_atmosphere_chart
+from core.visualize import compose_frame, create_atmosphere_chart, render_map_view, add_timestamp_label
 
 
 def _timeline_html(labels, current_idx=0):
@@ -114,34 +114,49 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             alerts_data = _format_alerts(alerts_raw)
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
 
-            # 3. Satellite (slow)
-            log("Downloading satellite tiles...")
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
+            # 3. Satellite imagery
+            is_gibs = product.startswith("gibs_")
             date_c = date.replace("-", "")
-            frames = sat_client.fetch_event(
-                satellite=satellite, product=product,
-                date=date_c, start_utc=sc, end_utc=ec,
-                lat=lat, lon=lon, zoom=int(zoom), bbox_deg=20.0,
-                on_progress=log,
-            )
-            log(f"Downloaded {len(frames)} frames")
+            date_dash = date.strip()
 
-            # 4. Compose
-            composed, labels = [], []
-            for i, f in enumerate(frames):
-                ts = str(f["timestamp"])
-                label = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]} UTC"
-                img = compose_frame(
-                    satellite_image=f["image"], timestamp=label,
-                    satellite_name=satellite["name"], location_str=display,
-                    center_x=f["image"].width // 2, center_y=f["image"].height // 2,
+            if is_gibs:
+                # GIBS: daily flat-projection tiles (MODIS/VIIRS), rendered with cartopy
+                log(f"Rendering GIBS map ({product})...")
+                yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
+                gibs_img = render_map_view(lat, lon, bbox_deg=20.0, date=date_dash,
+                                           output_size=(900, 700), cache=cache)
+                label = f"{date_dash} (daily) UTC"
+                img = add_timestamp_label(gibs_img, label, f"GIBS {product.split('_')[1].upper()}", display)
+                composed = [img]
+                labels = [label]
+                log("GIBS map rendered")
+            else:
+                # SLIDER: geostationary tiles with 10-15 min updates
+                log("Downloading satellite tiles...")
+                yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
+                frames = sat_client.fetch_event(
+                    satellite=satellite, product=product,
+                    date=date_c, start_utc=sc, end_utc=ec,
+                    lat=lat, lon=lon, zoom=int(zoom), bbox_deg=20.0,
+                    on_progress=log,
                 )
-                composed.append(img)
-                labels.append(label)
-                log(f"  Frame {i+1}/{len(frames)}")
-                if i == 0:
-                    yield out(image=img, timeline=_timeline_html(labels, 0),
-                              info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
+                log(f"Downloaded {len(frames)} frames")
+
+                composed, labels = [], []
+                for i, f in enumerate(frames):
+                    ts = str(f["timestamp"])
+                    label = f"{ts[:4]}-{ts[4:6]}-{ts[6:8]} {ts[8:10]}:{ts[10:12]} UTC"
+                    img = compose_frame(
+                        satellite_image=f["image"], timestamp=label,
+                        satellite_name=satellite["name"], location_str=display,
+                        center_x=f["image"].width // 2, center_y=f["image"].height // 2,
+                    )
+                    composed.append(img)
+                    labels.append(label)
+                    log(f"  Frame {i+1}/{len(frames)}")
+                    if i == 0:
+                        yield out(image=img, timeline=_timeline_html(labels, 0),
+                                  info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
 
             state["composed_frames"] = composed
             state["frame_labels"] = labels
@@ -179,8 +194,11 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                     end_input = gr.Textbox(label="End UTC", placeholder="12:00")
                 zoom_slider = gr.Slider(minimum=0, maximum=4, step=1, value=2,
                                         label="Zoom (0=wide, 4=close)")
-                product_dd = gr.Dropdown(choices=["geocolor", "band_13", "band_08"],
-                                          value="geocolor", label="Satellite Product")
+                product_dd = gr.Dropdown(
+                    choices=["gibs_modis", "gibs_viirs", "geocolor", "band_13", "band_08"],
+                    value="gibs_modis",
+                    label="Satellite Source",
+                )
                 resolved = gr.Textbox(label="Resolved", interactive=False)
                 fetch_btn = gr.Button("Fetch Data", variant="primary")
 

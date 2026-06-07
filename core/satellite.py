@@ -112,7 +112,8 @@ class SatelliteClient:
         composite = Image.new("RGBA", (width, height), (0, 0, 0, 0))
 
         for tx, ty in tiles:
-            path = self.download_tile(satellite, product, timestamp, zoom, tx, ty)
+            # tx=column (X), ty=row (Y). SLIDER URL is {ROW}_{COL}.png
+            path = self.download_tile(satellite, product, timestamp, zoom, row=ty, col=tx)
             if path:
                 tile_img = Image.open(path).convert("RGBA")
                 x = (tx - min_tx) * TILE_SIZE
@@ -182,13 +183,16 @@ class SatelliteClient:
 
             composite = self.download_and_stitch(sat_id, product, ts, zoom, tiles_needed)
             if composite:
+                try:
+                    crop = get_crop_bounds(lat, lon, bbox_deg, zoom, sat_lon)
+                    cropped = composite.crop(crop)
+                except Exception:
+                    cropped = composite
                 results.append({
                     "timestamp": ts,
-                    "image": composite,
+                    "image": cropped,
                     "satellite": sat_id,
                     "product": product,
-                    "zoom": zoom,
-                    "tile_bounds": (min_tx, min_ty, max_tx, max_ty),
                 })
 
         return results
