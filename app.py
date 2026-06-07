@@ -40,8 +40,8 @@ def _timeline_html(labels, current_idx=0):
         <input type='range' min='0' max='{n-1}' value='{current_idx}' step='1'
             style='width:100%;margin:4px 0 0 0;accent-color:#FFD700;cursor:pointer'
             oninput="
-                document.getElementById('wea-bridge').value=this.value;
-                document.getElementById('wea-bridge').dispatchEvent(new Event('change'));
+                var el=document.querySelector('#wea-bridge textarea')||document.querySelector('#wea-bridge input');
+                if(el){{var ns=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');if(!ns)ns=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');ns.set.call(el,this.value);el.dispatchEvent(new Event('input',{{bubbles:true}}));}}
             ">
     </div>"""
 
