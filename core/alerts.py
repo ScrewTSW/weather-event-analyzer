@@ -825,11 +825,48 @@ def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[li
             logger.warning(f"Failed to fetch from {source}: {e}")
             continue
 
-    # Sort by severity (extreme first)
-    severity_order = {"extreme": 0, "severe": 1, "moderate": 2, "minor": 3}
-    all_alerts.sort(key=lambda a: severity_order.get(a["severity"], 4))
+    # Filter by proximity — only show alerts within relevant distance
+    import math
+    def _alert_distance(alert, target_lat, target_lon):
+        geo = alert.get("geometry") or {}
+        coords = geo.get("coordinates")
+        if not coords or len(coords) < 2:
+            props = alert.get("properties", {})
+            a_lat, a_lon = props.get("lat"), props.get("lon")
+            if a_lat is None or a_lon is None:
+                return float("inf")
+            coords = [a_lon, a_lat]
+        a_lon, a_lat = float(coords[0]), float(coords[1])
+        dlat = math.radians(a_lat - target_lat)
+        dlon = math.radians(a_lon - target_lon)
+        a = math.sin(dlat/2)**2 + math.cos(math.radians(target_lat)) * math.cos(math.radians(a_lat)) * math.sin(dlon/2)**2
+        return math.degrees(2 * math.asin(math.sqrt(a)))
 
-    return all_alerts
+    max_distance = {
+        "earthquake": 15, "cyclone": 30, "tsunami": 40, "volcano": 20,
+        "flood": 10, "wildfire": 10, "drought": 15,
+        "tornado_warning": 5, "severe_thunderstorm": 5,
+        "convective_level1": 15, "convective_level2": 15, "convective_level3": 15,
+    }
+
+    filtered = []
+    for alert in all_alerts:
+        dist = _alert_distance(alert, lat, lon)
+        event_type = alert.get("event_type", "")
+        max_dist = max_distance.get(event_type, 20)
+        # Extreme/severe alerts visible from further away
+        if alert.get("severity") == "extreme":
+            max_dist *= 3
+        elif alert.get("severity") == "severe":
+            max_dist *= 2
+        if dist <= max_dist:
+            alert["properties"]["distance_deg"] = round(dist, 1)
+            filtered.append(alert)
+
+    severity_order = {"extreme": 0, "severe": 1, "moderate": 2, "minor": 3}
+    filtered.sort(key=lambda a: severity_order.get(a["severity"], 4))
+
+    return filtered
 
 
 class AlertPoller:

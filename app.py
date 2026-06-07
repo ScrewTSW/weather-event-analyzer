@@ -140,26 +140,26 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
             info = f"{display}\n{satellite['name']} ({satellite['slider_id']})"
 
-            # Show first frame, update slider range
             first_img = composed[0] if composed else None
-            slider_update = gr.update(minimum=0, maximum=max(0, len(composed) - 1), value=0, step=1,
-                                       label=f"Time: {labels[0]}" if labels else "Time")
+            n_frames = max(1, len(composed))
+            slider_max = n_frames - 1 if n_frames > 1 else 1
+            time_label = f"Frame (0-{slider_max}): {labels[0]}" if labels else "Frame"
 
-            return first_img, slider_update, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data
+            return first_img, gr.Slider(minimum=0, maximum=slider_max, value=0, step=1, label=time_label), cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data
 
         except Exception as e:
             import traceback
             log_lines.append(f"ERROR: {e}")
             log_lines.append(traceback.format_exc())
-            return None, gr.update(), None, None, None, "", "\n".join(log_lines), []
+            return None, gr.Slider(minimum=0, maximum=1, value=0, step=1, label="Frame"), None, None, None, "", "\n".join(log_lines), []
 
     def update_frame(frame_idx):
         idx = int(frame_idx)
         frames = state["composed_frames"]
         labels = state["frame_labels"]
         if not frames or idx >= len(frames):
-            return None, "Time"
-        return frames[idx], f"Time: {labels[idx]}"
+            return None
+        return frames[idx]
 
     with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
@@ -206,7 +206,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
         time_slider.change(
             fn=update_frame,
             inputs=[time_slider],
-            outputs=[sat_image, time_slider],
+            outputs=[sat_image],
         )
 
     return app
