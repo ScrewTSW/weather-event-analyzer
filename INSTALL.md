@@ -67,23 +67,19 @@ python main.py atmosphere --lat 45.75 --lon 126.65 --date 2026-05-31
 
 This makes the web UI available on your local network at `http://<your-ip>:7860`.
 
-**1. Edit the service file** to match your setup:
+**1. Create the service file** from the template — replace the placeholders with your values:
 
 ```bash
-# Review and adjust paths/user if needed
-nano weather-event-analyzer.service
+sed -e "s|USERNAME|$(whoami)|g" \
+    -e "s|APPLICATION_DIRECTORY|$(pwd)|g" \
+    weather-event-analyzer.service | sudo tee /etc/systemd/system/weather-event-analyzer.service
 ```
 
-The default service file assumes:
-- User: `USERNAME`
-- Project path: `APPLICATION_DIRECTORY`
-- Python at `/usr/bin/python`
-- Port 7860
+Or edit manually: replace `USERNAME` with your user and `APPLICATION_DIRECTORY` with the full path to this project.
 
-**2. Install and enable the service:**
+**2. Enable and start the service:**
 
 ```bash
-sudo cp weather-event-analyzer.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable weather-event-analyzer
 sudo systemctl start weather-event-analyzer
