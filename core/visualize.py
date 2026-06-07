@@ -260,17 +260,19 @@ def add_geo_overlay(img, center_lat, center_lon, bbox_deg=20.0):
         return add_location_marker(img, img.width // 2, img.height // 2)
 
     half = bbox_deg / 2
+    west = center_lon - half
+    east = center_lon + half
+    south = max(center_lat - half, -65.0)
+    north = min(center_lat + half, 65.0)
     map_crs = ccrs.PlateCarree()
 
     fig = plt.figure(figsize=(img.width / 100, img.height / 100), dpi=100)
     ax = fig.add_axes([0, 0, 1, 1], projection=map_crs)
-    ax.set_extent([center_lon - half, center_lon + half,
-                   center_lat - half, center_lat + half], crs=map_crs)
+    ax.set_extent([west, east, south, north], crs=map_crs)
+    ax.set_facecolor('#1a1a2e')
 
     ax.imshow(np.array(img.convert("RGB")), origin='upper', transform=map_crs,
-              extent=[center_lon - half, center_lon + half,
-                      center_lat - half, center_lat + half],
-              zorder=1)
+              extent=[west, east, south, north], zorder=1)
 
     ax.coastlines(resolution='50m', color='cyan', linewidth=0.8, alpha=0.8, zorder=5)
     ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5, zorder=5)
@@ -279,7 +281,7 @@ def add_geo_overlay(img, center_lat, center_lon, bbox_deg=20.0):
 
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
-                facecolor='black', edgecolor='none')
+                facecolor='#1a1a2e', edgecolor='none')
     plt.close(fig)
     buf.seek(0)
     return Image.open(buf).convert("RGBA")

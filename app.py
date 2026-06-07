@@ -115,13 +115,15 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
 
             # 3. Satellite imagery (pre-projected tiles from GIBS/EUMETSAT)
+            # Zoom: 0=40°(continental), 1=30°, 2=20°, 3=10°, 4=5°(city)
+            bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
             date_c = date.replace("-", "")
-            log("Fetching satellite imagery...")
+            log(f"Fetching satellite imagery (bbox={bbox_deg}°)...")
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
 
             frames = sat_client.fetch_event(
                 lat=lat, lon=lon, date=date_c, start_utc=sc, end_utc=ec,
-                product=product, zoom=int(zoom), bbox_deg=20.0,
+                product=product, zoom=int(zoom), bbox_deg=bbox_deg,
                 on_progress=log,
             )
             log(f"Got {len(frames)} frames")
@@ -130,7 +132,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             for i, f in enumerate(frames):
                 ts = f["timestamp"]
                 label = ts.replace("T", " ").replace("Z", " UTC")
-                img = add_geo_overlay(f["image"], lat, lon, bbox_deg=20.0)
+                img = add_geo_overlay(f["image"], lat, lon, bbox_deg=bbox_deg)
                 img = add_timestamp_label(img, label, f["source"], display)
                 composed.append(img)
                 labels.append(label)

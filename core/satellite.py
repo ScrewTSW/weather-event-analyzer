@@ -106,7 +106,9 @@ class SatelliteClient:
     def fetch_wms_image(self, source: dict, time_str: str, lat: float, lon: float,
                         bbox_deg: float = 20.0, size: int = 800) -> Optional[Image.Image]:
         half = bbox_deg / 2
-        bbox = (lon - half, lat - half, lon + half, lat + half)
+        north = min(lat + half, 65.0)
+        south = max(lat - half, -65.0)
+        bbox = (lon - half, south, lon + half, north)
         src_type = source["type"]
         layer = source["layer"]
 
