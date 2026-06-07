@@ -1,4 +1,5 @@
 # app.py
+import json
 from pathlib import Path
 
 import gradio as gr
@@ -13,37 +14,80 @@ from core.alerts import fetch_alerts
 from core.visualize import create_atmosphere_chart, add_timestamp_label, add_geo_overlay
 
 
-def _timeline_html(labels, current_idx=0):
-    """Build the unified timeline HTML with notches, timestamps, and embedded slider."""
-    if not labels:
-        return "<div style='height:60px;background:#1a1a2e;border-radius:8px'></div>"
-    n = len(labels)
-    notches = []
-    for i, ts in enumerate(labels):
-        parts = ts.replace(" UTC", "").split(" ")
-        time_part = parts[-1] if len(parts) > 1 else ts
-        date_parts = parts[0].split("-") if parts else []
-        short_date = f"{date_parts[1]}/{date_parts[2]}" if len(date_parts) == 3 else ""
-        is_cur = (i == current_idx)
-        color = "#FFD700" if is_cur else "#888"
-        weight = "bold" if is_cur else "normal"
-        date_html = f"<div style='font-size:9px;color:#555'>{short_date}</div>" if (is_cur or i == 0) else ""
-        notches.append(f"""<div style='flex:1;text-align:center'>
-            {date_html}
-            <div style='font-size:11px;color:{color};font-weight:{weight}'>{time_part}</div>
-            <div style='width:2px;height:{"16" if is_cur else "10"}px;background:{color};margin:2px auto'></div>
-        </div>""")
+TIMELINE_HTML_TEMPLATE = """
+<div style="background:#1a1a2e;border-radius:8px;padding:8px 12px 4px">
+    <div id="tl-notches" style="display:flex;align-items:flex-end"></div>
+    <div style="height:1px;background:#444;margin:0"></div>
+    <input type="range" min="0" max="${Math.max(0,(frame_count||1)-1)}"
+           value="${value||0}" step="1" id="tl-slider"
+           style="width:100%;margin:4px 0 0;accent-color:#FFD700;cursor:pointer"
+           ${(frame_count||0)<=1?'disabled':''}>
+</div>
+"""
 
-    return f"""<div style='background:#1a1a2e;border-radius:8px;padding:8px 12px 4px 12px'>
-        <div style='display:flex;align-items:flex-end'>{chr(10).join(notches)}</div>
-        <div style='height:1px;background:#444;margin:0'></div>
-        <input type='range' min='0' max='{n-1}' value='{current_idx}' step='1'
-            style='width:100%;margin:4px 0 0 0;accent-color:#FFD700;cursor:pointer'
-            oninput="
-                var el=document.querySelector('#wea-bridge textarea')||document.querySelector('#wea-bridge input');
-                if(el){{var ns=Object.getOwnPropertyDescriptor(window.HTMLTextAreaElement.prototype,'value');if(!ns)ns=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value');ns.set.call(el,this.value);el.dispatchEvent(new Event('input',{{bubbles:true}}));}}
-            ">
-    </div>"""
+TIMELINE_CSS = """
+#tl-slider:disabled { opacity:0.3; cursor:default; }
+"""
+
+TIMELINE_JS = """
+function renderNotches() {
+    var c = element.querySelector('#tl-notches');
+    if (!c) return;
+    var labels = [];
+    try { labels = JSON.parse(props.labels_json || '[]'); } catch(e) {}
+    c.innerHTML = '';
+    labels.forEach(function(ts, i) {
+        var parts = ts.replace(' UTC','').split(' ');
+        var timePart = parts.length > 1 ? parts[parts.length-1] : ts;
+        var dp = parts[0] ? parts[0].split('-') : [];
+        var shortDate = dp.length === 3 ? dp[1]+'/'+dp[2] : '';
+        var isCur = (i === (props.value||0));
+        var color = isCur ? '#FFD700' : '#888';
+        var weight = isCur ? 'bold' : 'normal';
+        var dateHtml = (isCur || i === 0) ? '<div style=\"font-size:9px;color:#555\">'+shortDate+'</div>' : '';
+        var d = document.createElement('div');
+        d.style.cssText = 'flex:1;text-align:center';
+        d.innerHTML = dateHtml +
+            '<div style=\"font-size:11px;color:'+color+';font-weight:'+weight+'\">'+timePart+'</div>' +
+            '<div style=\"width:2px;height:'+(isCur?16:10)+'px;background:'+color+';margin:2px auto\"></div>';
+        c.appendChild(d);
+    });
+}
+
+var slider = element.querySelector('#tl-slider');
+slider.addEventListener('input', function(e) {
+    props.value = parseInt(e.target.value);
+    renderNotches();
+    trigger('change', {frame_index: props.value});
+});
+
+document.addEventListener('keydown', function(e) {
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
+        var s = element.querySelector('#tl-slider');
+        if (!s || s.disabled) return;
+        var mx = parseInt(s.max);
+        var v = parseInt(s.value);
+        if (e.key === 'ArrowLeft') v = Math.max(0, v-1);
+        else v = Math.min(mx, v+1);
+        s.value = v;
+        props.value = v;
+        renderNotches();
+        trigger('change', {frame_index: v});
+    }
+});
+
+watch(['value','labels_json','frame_count'], function() {
+    var s = element.querySelector('#tl-slider');
+    if (s) {
+        s.max = Math.max(0, (props.frame_count||1)-1);
+        s.value = props.value||0;
+        s.disabled = (props.frame_count||0) <= 1;
+    }
+    renderNotches();
+});
+
+renderNotches();
+"""
 
 
 def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
@@ -137,14 +181,14 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                 composed.append(img)
                 labels.append(label)
                 if i == 0:
-                    yield out(image=img, timeline=_timeline_html(labels, 0),
+                    yield out(image=img, timeline=gr.HTML(value=0, labels_json=json.dumps(labels), frame_count=len(labels)),
                               info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
 
             state["composed_frames"] = composed
             state["frame_labels"] = labels
             log("Done.")
             yield out(image=composed[0] if composed else None,
-                      timeline=_timeline_html(labels, 0),
+                      timeline=gr.HTML(value=0, labels_json=json.dumps(labels), frame_count=len(labels)),
                       info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
 
         except Exception as e:
@@ -152,17 +196,18 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             log_lines.append(f"ERROR: {e}\n{traceback.format_exc()}")
             yield out()
 
-    def on_frame_change(bridge_val):
-        """Called when the hidden bridge input changes (from HTML slider JS)."""
+    def on_frame_change(timeline_value, evt: gr.EventData = None):
+        """Called when the timeline slider triggers 'change' via JS trigger()."""
+        import json
         try:
-            idx = int(float(bridge_val))
+            idx = int(timeline_value) if timeline_value is not None else 0
         except (ValueError, TypeError):
-            return None, ""
+            idx = 0
         frames = state["composed_frames"]
         labels = state["frame_labels"]
         if not frames or idx >= len(frames):
-            return None, ""
-        return frames[idx], _timeline_html(labels, current_idx=idx)
+            return None, gr.skip()
+        return frames[idx], gr.HTML(value=idx, labels_json=json.dumps(labels), frame_count=len(labels))
 
     with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
@@ -186,26 +231,14 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
             with gr.Column(scale=2):
                 sat_image = gr.Image(label="Satellite Imagery", type="pil", height=520)
-                timeline = gr.HTML(value="<div style='height:60px;background:#1a1a2e;border-radius:8px'></div>")
-
-        # Hidden bridge: HTML slider JS writes here, Gradio .change() reads it
-        bridge = gr.Textbox(value="0", elem_id="wea-bridge", visible=False)
-
-        # Arrow key listener (injected once)
-        gr.HTML("""<script>
-        document.addEventListener('keydown', function(e) {
-            var s = document.querySelector('#component-timeline input[type=range]');
-            if (!s) s = document.querySelector('input[type=range][max]');
-            if (!s || s.closest('[class*=slider]')) return;
-            if (e.key === 'ArrowLeft') {
-                s.value = Math.max(0, parseInt(s.value) - 1);
-                s.dispatchEvent(new Event('input'));
-            } else if (e.key === 'ArrowRight') {
-                s.value = Math.min(parseInt(s.max), parseInt(s.value) + 1);
-                s.dispatchEvent(new Event('input'));
-            }
-        });
-        </script>""")
+                timeline = gr.HTML(
+                    value=0,
+                    frame_count=0,
+                    labels_json="[]",
+                    html_template=TIMELINE_HTML_TEMPLATE,
+                    css_template=TIMELINE_CSS,
+                    js_on_load=TIMELINE_JS,
+                )
 
         with gr.Row():
             cape_plot = gr.Plot(label="CAPE / CIN")
@@ -224,9 +257,9 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             outputs=[sat_image, timeline, cape_plot, temp_plot, wind_plot,
                      resolved, status_log, alerts_table],
         )
-        bridge.change(
+        timeline.change(
             fn=on_frame_change,
-            inputs=[bridge],
+            inputs=[timeline],
             outputs=[sat_image, timeline],
         )
 
