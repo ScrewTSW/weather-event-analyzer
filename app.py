@@ -72,12 +72,24 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
     def fetch_data(location_str, date, start_utc, end_utc, zoom, product):
         log_lines = []
+        empty = (None, "<div></div>", 0, None, None, None, "", "", [])
+
         def log(msg):
             log_lines.append(msg)
 
+        def partial(**kw):
+            base = list(empty)
+            base[7] = "\n".join(log_lines)
+            for k, v in kw.items():
+                idx = {"image": 0, "timeline": 1, "frame": 2, "cape": 3, "temp": 4, "wind": 5, "info": 6, "alerts": 8}[k]
+                base[idx] = v
+            return tuple(base)
+
         try:
             if not location_str or not location_str.strip():
-                return None, gr.update(), None, None, None, "", "ERROR: Enter a location", []
+                log("ERROR: Enter a location")
+                yield partial()
+                return
 
             from datetime import datetime, timedelta
             try:
@@ -91,38 +103,76 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                 log(f"Using today: {date}")
             if not start_utc or not start_utc.strip():
                 start_utc = (now - timedelta(hours=2)).strftime("%H:%M")
-                log(f"Start defaulted to 2h ago: {start_utc} UTC")
+                log(f"Start: {start_utc} UTC (2h ago)")
             if not end_utc or not end_utc.strip():
                 end_utc = now.strftime("%H:%M")
-                log(f"End defaulted to now: {end_utc} UTC")
+                log(f"End: {end_utc} UTC (now)")
+
+            log("Resolving location...")
+            yield partial()
 
             lat, lon, display, satellite = resolve_location(location_str)
+            info = f"{display}\n{satellite['name']} ({satellite['slider_id']})"
             log(f"Location: {display}")
             log(f"Satellite: {satellite['name']} ({satellite['slider_id']})")
+            yield partial(info=info)
 
             date_compact = date.strip().replace("-", "")
             start_clean = start_utc.replace(":", "")
             end_clean = end_utc.replace(":", "")
             log(f"Time range: {start_clean}-{end_clean} UTC on {date_compact}")
 
+            log("Downloading satellite tiles...")
+            yield partial(info=info)
+
             frames = sat_client.fetch_event(
-                satellite=satellite,
-                product=product,
-                date=date_compact,
-                start_utc=start_clean,
-                end_utc=end_clean,
-                lat=lat, lon=lon,
-                zoom=int(zoom),
-                bbox_deg=20.0,
+                satellite=satellite, product=product,
+                date=date_compact, start_utc=start_clean, end_utc=end_clean,
+                lat=lat, lon=lon, zoom=int(zoom), bbox_deg=20.0,
                 on_progress=log,
             )
             log(f"Downloaded {len(frames)} satellite frames")
+            yield partial(info=info)
+
+            log("Rendering map views...")
+            yield partial(info=info)
+
+            composed = []
+            labels = []
+            for i, frame in enumerate(frames):
+                ts_str = str(frame["timestamp"])
+                ts_fmt = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]} {ts_str[8:10]}:{ts_str[10:12]} UTC"
+                img = compose_frame(
+                    satellite_image=frame["image"], timestamp=ts_fmt,
+                    satellite_name=satellite["name"], location_str=display,
+                    sat_lon=satellite["lon"], center_lat=lat, center_lon=lon,
+                    bbox_deg=20.0, tile_bounds=frame.get("tile_bounds"), zoom=frame.get("zoom"),
+                )
+                composed.append(img)
+                labels.append(ts_fmt)
+                log(f"  Rendered frame {i+1}/{len(frames)}")
+                if i == 0:
+                    yield partial(image=img, timeline=_build_timeline_html(labels, 0), info=info)
+
+            state["composed_frames"] = composed
+            state["frame_labels"] = labels
 
             log("Fetching atmosphere data...")
+            tl_html = _build_timeline_html(labels, 0) if labels else "<div></div>"
+            first_img = composed[0] if composed else None
+            yield partial(image=first_img, timeline=tl_html, info=info)
+
             atmo = atmo_client.fetch(lat, lon, date)
-            log(f"Atmosphere data: {atmo['source']} ({len(atmo['timestamps'])} hours)")
+            log(f"Atmosphere: {atmo['source']} ({len(atmo['timestamps'])} hours)")
+
+            cape_fig = create_atmosphere_chart(atmo, "cape_cin")
+            temp_fig = create_atmosphere_chart(atmo, "temp_dewpoint")
+            wind_fig = create_atmosphere_chart(atmo, "wind")
+            yield partial(image=first_img, timeline=tl_html, cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info)
 
             log("Fetching severe weather alerts...")
+            yield partial(image=first_img, timeline=tl_html, cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info)
+
             start_h = int(start_clean) if start_clean else 0
             end_h = int(end_clean) if end_clean else 2359
             mid_h = str((start_h + end_h) // 2).zfill(4)
@@ -130,23 +180,20 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             alerts = fetch_alerts(lat, lon, alert_time)
             log(f"Found {len(alerts)} alerts")
 
-            # Format alerts for dataframe
             alerts_data = []
             for a in alerts:
                 props = a.get("properties", {})
                 intensity_text = props.get("intensity_text", "")
-                if not intensity_text or intensity_text.strip() == "Magnitude 0":
+                if not intensity_text or intensity_text.strip() in ("Magnitude 0", "Magnitude 0 "):
                     intensity_val = props.get("intensity", "")
-                    if intensity_val and float(intensity_val) > 0:
-                        intensity_unit = props.get("intensity_unit", "")
-                        intensity_text = f"{intensity_val} {intensity_unit}".strip()
-                    else:
+                    try:
+                        if intensity_val and float(intensity_val) > 0:
+                            intensity_text = f"{intensity_val} {props.get('intensity_unit', '')}".strip()
+                        else:
+                            ev = a.get("event_type", "")
+                            intensity_text = {"flood": "Active flooding", "drought": "Drought conditions"}.get(ev, a["severity"].title())
+                    except (ValueError, TypeError):
                         intensity_text = a["severity"].title()
-                        ev = a.get("event_type", "")
-                        if ev == "flood":
-                            intensity_text = "Active flooding"
-                        elif ev == "drought":
-                            intensity_text = props.get("intensity_text", "Drought conditions")
                 alert_lat = props.get("lat", "")
                 alert_lon = props.get("lon", "")
                 geo = a.get("geometry") or {}
@@ -155,57 +202,19 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                     alert_lon, alert_lat = coords[0], coords[1]
                 gps = f"{alert_lat}, {alert_lon}" if alert_lat and alert_lon else ""
                 alerts_data.append([
-                    a["severity"].upper(),
-                    a["event_type"],
-                    a["title"][:60],
-                    intensity_text[:30],
-                    gps,
-                    a.get("source", ""),
-                    a.get("valid_from", "")[:16],
-                    a.get("valid_to", "")[:16],
+                    a["severity"].upper(), a["event_type"], a["title"][:60],
+                    intensity_text[:30], gps, a.get("source", ""),
+                    a.get("valid_from", "")[:16], a.get("valid_to", "")[:16],
                 ])
 
-            # Compose frames with all layers
-            composed = []
-            labels = []
-            for frame in frames:
-                ts_str = str(frame["timestamp"])
-                ts_fmt = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]} {ts_str[8:10]}:{ts_str[10:12]} UTC"
-                img = compose_frame(
-                    satellite_image=frame["image"],
-                    timestamp=ts_fmt,
-                    satellite_name=satellite["name"],
-                    location_str=display,
-                    sat_lon=satellite["lon"],
-                    center_lat=lat,
-                    center_lon=lon,
-                    bbox_deg=20.0,
-                    tile_bounds=frame.get("tile_bounds"),
-                    zoom=frame.get("zoom"),
-                )
-                composed.append(img)
-                labels.append(ts_fmt)
-
-            state["composed_frames"] = composed
-            state["frame_labels"] = labels
-
-            # Charts
-            cape_fig = create_atmosphere_chart(atmo, "cape_cin")
-            temp_fig = create_atmosphere_chart(atmo, "temp_dewpoint")
-            wind_fig = create_atmosphere_chart(atmo, "wind")
-
-            info = f"{display}\n{satellite['name']} ({satellite['slider_id']})"
-
-            first_img = composed[0] if composed else None
-            tl_html = _build_timeline_html(labels, current_idx=0)
-
-            return (first_img, tl_html, 0, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data)
+            log("Done.")
+            yield partial(image=first_img, timeline=tl_html, cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info, alerts=alerts_data)
 
         except Exception as e:
             import traceback
             log_lines.append(f"ERROR: {e}")
             log_lines.append(traceback.format_exc())
-            return (None, "<div style='height:50px'></div>", 0, None, None, None, "", "\n".join(log_lines), [])
+            yield partial()
 
     def update_frame(idx):
         idx = int(idx)
