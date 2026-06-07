@@ -29,12 +29,14 @@ def build_timestamps_url(satellite: str, product: str, date: Optional[str] = Non
     return f"{SLIDER_BASE}/data/json/{satellite}/full_disk/{product}/latest_times.json"
 
 
-def filter_timestamps(timestamps: list[int], start_utc: str, end_utc: str) -> list[int]:
+def filter_timestamps(timestamps: list[int], start_utc: str, end_utc: str, date: str = None) -> list[int]:
     start_hhmm = int(start_utc.replace(":", ""))
     end_hhmm = int(end_utc.replace(":", ""))
     filtered = []
     for ts in timestamps:
         ts_str = str(ts)
+        if date and not ts_str.startswith(date):
+            continue
         hhmm = int(ts_str[8:12])
         if start_hhmm <= hhmm <= end_hhmm:
             filtered.append(ts)
@@ -48,14 +50,22 @@ class SatelliteClient:
         self.session.headers["User-Agent"] = USER_AGENT
 
     def fetch_timestamps(self, satellite: str, product: str, date: str) -> list[int]:
-        url = build_timestamps_url(satellite, product, date=date)
-        resp = self.session.get(url, timeout=15)
+        # Try date-specific by_hour endpoint first, fall back to latest_times
+        if date:
+            url = build_timestamps_url(satellite, product, date=date)
+            resp = self.session.get(url, timeout=15)
+            if resp.status_code == 404:
+                url = build_timestamps_url(satellite, product, date=None)
+                resp = self.session.get(url, timeout=15)
+        else:
+            url = build_timestamps_url(satellite, product, date=None)
+            resp = self.session.get(url, timeout=15)
+
         resp.raise_for_status()
         data = resp.json()
 
         if "timestamps_int" in data:
             if isinstance(data["timestamps_int"], dict):
-                # by_hour format: {"11": [...], "10": [...]}
                 all_ts = []
                 for hour_ts in data["timestamps_int"].values():
                     all_ts.extend(hour_ts)
@@ -131,7 +141,7 @@ class SatelliteClient:
             on_progress(f"Fetching timestamps for {sat_id}/{product} on {date}...")
 
         timestamps = self.fetch_timestamps(sat_id, product, date)
-        timestamps = filter_timestamps(timestamps, start_utc, end_utc)
+        timestamps = filter_timestamps(timestamps, start_utc, end_utc, date=date)
 
         if not timestamps and on_progress:
             on_progress(f"No timestamps found in range {start_utc}-{end_utc}")

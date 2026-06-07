@@ -46,7 +46,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                 start_utc=start_utc.replace(":", ""),
                 end_utc=end_utc.replace(":", ""),
                 lat=lat, lon=lon,
-                zoom=zoom,
+                zoom=int(zoom),
                 on_progress=log,
             )
             state["frames"] = frames
@@ -108,7 +108,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             log_lines.append(f"ERROR: {e}")
             return [], None, None, None, "", "\n".join(log_lines), []
 
-    with gr.Blocks(title="Weather Event Analyzer", theme=gr.themes.Soft()) as app:
+    with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
 
         with gr.Row():
