@@ -95,13 +95,20 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             # Format alerts for dataframe
             alerts_data = []
             for a in alerts:
+                props = a.get("properties", {})
+                intensity = props.get("magnitude", props.get("wind_speed", props.get("alertscore", "")))
+                location = props.get("country", props.get("region", ""))
+                if not location and "in " in a.get("title", ""):
+                    location = a["title"].split("in ", 1)[-1][:30]
                 alerts_data.append([
                     a["severity"].upper(),
                     a["event_type"],
-                    a["title"][:80],
+                    a["title"][:60],
+                    str(intensity),
+                    location[:25],
                     a.get("source", ""),
-                    a.get("valid_from", "")[:19],
-                    a.get("valid_to", "")[:19],
+                    a.get("valid_from", "")[:16],
+                    a.get("valid_to", "")[:16],
                 ])
 
             # Build gallery images using compose_frame for proper layer compositing
@@ -153,7 +160,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                 fetch_btn = gr.Button("Fetch Data", variant="primary")
 
             with gr.Column(scale=2):
-                gallery = gr.Gallery(label="Satellite Imagery", columns=3, height=400)
+                gallery = gr.Gallery(label="Satellite Imagery", columns=2, height=600, object_fit="contain")
 
         with gr.Row():
             cape_plot = gr.Plot(label="CAPE / CIN")
@@ -161,7 +168,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             wind_plot = gr.Plot(label="Wind Speed")
 
         alerts_table = gr.Dataframe(
-            headers=["Severity", "Event", "Title", "Source", "From", "To"],
+            headers=["Severity", "Event", "Title", "Intensity", "Location", "Source", "From", "To"],
             label="Active Severe Weather Alerts",
             wrap=True,
         )

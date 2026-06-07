@@ -143,8 +143,23 @@ class SatelliteClient:
         timestamps = self.fetch_timestamps(sat_id, product, date)
         timestamps = filter_timestamps(timestamps, start_utc, end_utc, date=date)
 
-        if not timestamps and on_progress:
-            on_progress(f"No timestamps found in range {start_utc}-{end_utc}")
+        if not timestamps:
+            # No data for requested date — try without date filter to find nearest available
+            all_ts = self.fetch_timestamps(sat_id, product, None)
+            if all_ts:
+                nearest_date = str(all_ts[-1])[:8]
+                if on_progress:
+                    on_progress(f"No data for {date}, using nearest available: {nearest_date}")
+                timestamps = filter_timestamps(all_ts, start_utc, end_utc, date=nearest_date)
+                if not timestamps:
+                    # Still nothing in the time range — take latest few frames
+                    timestamps = all_ts[-6:]
+                    if on_progress:
+                        on_progress(f"Time range {start_utc}-{end_utc} not in {nearest_date}, showing latest {len(timestamps)} frames")
+
+        if not timestamps:
+            if on_progress:
+                on_progress("No timestamps available from this satellite")
             return []
 
         tiles_needed = latlon_to_tiles(lat, lon, bbox_deg, zoom, sat_lon)
