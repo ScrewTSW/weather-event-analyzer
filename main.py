@@ -10,8 +10,9 @@ def main():
     parser.add_argument("--cache-max", type=float, default=5.0, help="Max cache size in GB")
 
     subparsers = parser.add_subparsers(dest="command")
-    # CLI subcommands added in Task 9
-    _ = subparsers  # placeholder
+
+    from cli import add_subparsers
+    add_subparsers(subparsers)
 
     args = parser.parse_args()
 
