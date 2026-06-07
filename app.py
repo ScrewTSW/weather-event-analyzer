@@ -10,7 +10,7 @@ from core.location import resolve_location
 from core.satellite import SatelliteClient
 from core.atmosphere import OpenMeteoClient
 from core.alerts import fetch_alerts
-from core.visualize import compose_frame, create_atmosphere_chart, create_timelapse_gif
+from core.visualize import compose_frame, create_atmosphere_chart, create_timelapse_gif, create_timeline_bar
 
 
 def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
@@ -154,24 +154,26 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             n_frames = max(1, len(composed))
             slider_max = n_frames - 1 if n_frames > 1 else 1
             first_ts = labels[0] if labels else ""
+            timeline = create_timeline_bar(labels, current_idx=0)
 
             return (first_img, gr.Slider(minimum=0, maximum=slider_max, value=0, step=1, label="Frame"),
-                    first_ts, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data)
+                    timeline, first_ts, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data)
 
         except Exception as e:
             import traceback
             log_lines.append(f"ERROR: {e}")
             log_lines.append(traceback.format_exc())
             return (None, gr.Slider(minimum=0, maximum=1, value=0, step=1, label="Frame"),
-                    "", None, None, None, "", "\n".join(log_lines), [])
+                    None, "", None, None, None, "", "\n".join(log_lines), [])
 
     def update_frame(frame_idx):
         idx = int(frame_idx)
         frames = state["composed_frames"]
         labels = state["frame_labels"]
         if not frames or idx >= len(frames):
-            return None, ""
-        return frames[idx], labels[idx]
+            return None, None, ""
+        timeline = create_timeline_bar(labels, current_idx=idx)
+        return frames[idx], timeline, labels[idx]
 
     with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
@@ -193,7 +195,8 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                 fetch_btn = gr.Button("Fetch Data", variant="primary")
 
             with gr.Column(scale=2):
-                sat_image = gr.Image(label="Satellite Imagery", type="pil", height=550)
+                sat_image = gr.Image(label="Satellite Imagery", type="pil", height=500)
+                timeline_plot = gr.Plot(label=None, show_label=False)
                 with gr.Row():
                     time_slider = gr.Slider(minimum=0, maximum=1, step=1, value=0, label="Frame", scale=4)
                     time_label = gr.Textbox(label="Timestamp", interactive=False, scale=1)
@@ -214,13 +217,13 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
         fetch_btn.click(
             fn=fetch_data,
             inputs=[location_input, date_input, start_input, end_input, zoom_slider, product_dropdown],
-            outputs=[sat_image, time_slider, time_label, cape_plot, temp_plot, wind_plot, resolved_info, status_log, alerts_table],
+            outputs=[sat_image, time_slider, timeline_plot, time_label, cape_plot, temp_plot, wind_plot, resolved_info, status_log, alerts_table],
         )
 
         time_slider.change(
             fn=update_frame,
             inputs=[time_slider],
-            outputs=[sat_image, time_label],
+            outputs=[sat_image, timeline_plot, time_label],
         )
 
     return app

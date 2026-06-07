@@ -389,6 +389,65 @@ def create_atmosphere_chart(data, chart_type):
     return fig
 
 
+def create_timeline_bar(timestamps, current_idx=0):
+    """Render a notched timeline bar with timestamps above each notch.
+
+    Args:
+        timestamps: list of timestamp strings (e.g., "2026-06-06 10:00 UTC")
+        current_idx: index of the currently selected frame
+
+    Returns:
+        matplotlib Figure showing the timeline
+    """
+    plt.style.use("dark_background")
+    n = len(timestamps)
+    if n == 0:
+        fig, ax = plt.subplots(figsize=(9, 0.6))
+        ax.set_visible(False)
+        return fig
+
+    fig, ax = plt.subplots(figsize=(9, 0.8))
+    ax.set_xlim(-0.5, n - 0.5)
+    ax.set_ylim(-0.3, 1.0)
+
+    # Draw the horizontal line
+    ax.plot([-0.3, n - 0.7], [0, 0], color='#888888', linewidth=2, zorder=1)
+
+    for i, ts in enumerate(timestamps):
+        # Extract short label: "HH:MM" from "YYYY-MM-DD HH:MM UTC"
+        parts = ts.replace(" UTC", "").split(" ")
+        time_part = parts[-1] if len(parts) > 1 else ts
+        date_part = parts[0].split("-")
+        short_date = f"{date_part[1]}/{date_part[2]}" if len(date_part) == 3 else ""
+
+        is_current = (i == current_idx)
+        notch_color = '#FFD700' if is_current else '#AAAAAA'
+        notch_height = 0.35 if is_current else 0.2
+        notch_width = 2.5 if is_current else 1.5
+
+        # Notch
+        ax.plot([i, i], [-notch_height, notch_height], color=notch_color,
+                linewidth=notch_width, zorder=2)
+
+        # Current frame marker
+        if is_current:
+            ax.plot(i, -0.25, marker='^', color='#FFD700', markersize=8, zorder=3)
+
+        # Labels — show all if <=12 frames, else every Nth
+        show_label = n <= 12 or i % max(1, n // 10) == 0 or is_current
+        if show_label:
+            fontsize = 7 if n > 8 else 8
+            ax.text(i, 0.45, time_part, ha='center', va='bottom',
+                    fontsize=fontsize, color=notch_color, fontweight='bold' if is_current else 'normal')
+            if short_date and (n <= 6 or is_current):
+                ax.text(i, 0.75, short_date, ha='center', va='bottom',
+                        fontsize=6, color='#666666')
+
+    ax.set_axis_off()
+    fig.subplots_adjust(left=0.02, right=0.98, top=0.95, bottom=0.05)
+    return fig
+
+
 def create_timelapse_gif(frames, output_path, fps=4):
     """Create animated GIF from a list of PIL Images.
 
