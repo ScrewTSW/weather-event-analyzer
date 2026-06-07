@@ -72,6 +72,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                 end_utc=end_clean,
                 lat=lat, lon=lon,
                 zoom=int(zoom),
+                bbox_deg=20.0,
                 on_progress=log,
             )
             state["frames"] = frames

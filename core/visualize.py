@@ -52,9 +52,12 @@ def add_timestamp_label(img, timestamp, satellite, location):
     result = img.copy()
     draw = ImageDraw.Draw(result, "RGBA")
 
-    # Prepare text
-    font_large = _get_font(14)
-    font_small = _get_font(11)
+    # Scale font to image size (target: ~3% of image height for large, ~2.5% for small)
+    min_dim = min(img.width, img.height)
+    font_size_large = max(10, min(24, int(min_dim * 0.035)))
+    font_size_small = max(8, min(18, int(min_dim * 0.028)))
+    font_large = _get_font(font_size_large)
+    font_small = _get_font(font_size_small)
 
     lines = [
         (satellite, font_large),
@@ -62,9 +65,8 @@ def add_timestamp_label(img, timestamp, satellite, location):
         (location, font_small),
     ]
 
-    # Calculate label dimensions
-    padding = 10
-    line_spacing = 5
+    padding = max(4, int(min_dim * 0.01))
+    line_spacing = max(2, int(min_dim * 0.005))
     max_width = 0
     total_height = padding * 2
 
@@ -94,7 +96,7 @@ def add_timestamp_label(img, timestamp, satellite, location):
     return result
 
 
-def add_location_marker(img, center_x, center_y, color=(0, 255, 255, 255), size=20):
+def add_location_marker(img, center_x, center_y, color=(0, 255, 255, 255), size=None):
     """Add a crosshair marker at the specified location.
 
     Args:
@@ -110,7 +112,8 @@ def add_location_marker(img, center_x, center_y, color=(0, 255, 255, 255), size=
     result = img.copy()
     draw = ImageDraw.Draw(result, "RGBA")
 
-    # Draw crosshair
+    if size is None:
+        size = max(8, min(30, min(img.width, img.height) // 20))
     half_size = size // 2
 
     # Horizontal line
@@ -195,6 +198,7 @@ def create_atmosphere_chart(data, chart_type):
     Returns:
         matplotlib Figure
     """
+    plt.style.use("dark_background")
     timestamps = data["timestamps"]
     variables = data["variables"]
 
