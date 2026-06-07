@@ -261,6 +261,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             fn=on_frame_change,
             inputs=[timeline],
             outputs=[sat_image, timeline],
+            show_progress="hidden",
         )
 
     return app
