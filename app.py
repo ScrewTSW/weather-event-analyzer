@@ -10,7 +10,7 @@ from core.location import resolve_location
 from core.satellite import SatelliteClient, SOURCES
 from core.atmosphere import OpenMeteoClient
 from core.alerts import fetch_alerts
-from core.visualize import compose_frame, create_atmosphere_chart, add_timestamp_label
+from core.visualize import create_atmosphere_chart, add_timestamp_label, add_geo_overlay
 
 
 def _timeline_html(labels, current_idx=0):
@@ -130,8 +130,8 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             for i, f in enumerate(frames):
                 ts = f["timestamp"]
                 label = ts.replace("T", " ").replace("Z", " UTC")
-                img = add_timestamp_label(
-                    f["image"], label, f["source"], display)
+                img = add_geo_overlay(f["image"], lat, lon, bbox_deg=20.0)
+                img = add_timestamp_label(img, label, f["source"], display)
                 composed.append(img)
                 labels.append(label)
                 if i == 0:

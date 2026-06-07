@@ -254,6 +254,37 @@ def render_map_view(center_lat, center_lon, bbox_deg=20.0, date=None,
     return Image.open(buf).convert("RGBA")
 
 
+def add_geo_overlay(img, center_lat, center_lon, bbox_deg=20.0):
+    """Overlay coastlines, borders, and target marker on a pre-projected satellite image."""
+    if not HAS_CARTOPY:
+        return add_location_marker(img, img.width // 2, img.height // 2)
+
+    half = bbox_deg / 2
+    map_crs = ccrs.PlateCarree()
+
+    fig = plt.figure(figsize=(img.width / 100, img.height / 100), dpi=100)
+    ax = fig.add_axes([0, 0, 1, 1], projection=map_crs)
+    ax.set_extent([center_lon - half, center_lon + half,
+                   center_lat - half, center_lat + half], crs=map_crs)
+
+    ax.imshow(np.array(img.convert("RGB")), origin='upper', transform=map_crs,
+              extent=[center_lon - half, center_lon + half,
+                      center_lat - half, center_lat + half],
+              zorder=1)
+
+    ax.coastlines(resolution='50m', color='cyan', linewidth=0.8, alpha=0.8, zorder=5)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5, zorder=5)
+    ax.plot(center_lon, center_lat, '+', color='yellow', markersize=12,
+            markeredgewidth=2, transform=map_crs, zorder=10)
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
+                facecolor='black', edgecolor='none')
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf).convert("RGBA")
+
+
 def compose_frame(satellite_image, timestamp, satellite_name, location_str,
                   center_x=None, center_y=None, sat_lon=None, center_lat=None,
                   center_lon=None, bbox_deg=20.0, tile_bounds=None, zoom=None):
@@ -276,22 +307,12 @@ def compose_frame(satellite_image, timestamp, satellite_name, location_str,
     Returns:
         PIL Image (RGBA) - fully composited frame
     """
-    if center_lat is not None and center_lon is not None and HAS_CARTOPY:
-        date_str = None
-        if timestamp:
-            parts = timestamp.replace(" UTC", "").split(" ")
-            if parts:
-                date_str = parts[0]
-        frame = render_map_view(
-            center_lat, center_lon, bbox_deg=bbox_deg,
-            date=date_str, output_size=(900, 700))
+    if satellite_image.mode != "RGBA":
+        frame = satellite_image.convert("RGBA")
     else:
-        if satellite_image.mode != "RGBA":
-            frame = satellite_image.convert("RGBA")
-        else:
-            frame = satellite_image.copy()
-        if center_x is not None and center_y is not None:
-            frame = add_location_marker(frame, center_x, center_y)
+        frame = satellite_image.copy()
+    if center_x is not None and center_y is not None:
+        frame = add_location_marker(frame, center_x, center_y)
 
     # Final layer: timestamp label
     frame = add_timestamp_label(frame, timestamp, satellite_name, location_str)
