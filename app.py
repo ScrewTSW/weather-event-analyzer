@@ -40,7 +40,7 @@ def _build_timeline_html(labels, current_idx=0):
         style='width:100%;margin:0;accent-color:#FFD700;cursor:pointer'
         oninput="
             let v=parseInt(this.value);
-            let el=document.querySelector('input[data-testid=\\'number-input\\']');
+            let el=document.querySelector('#wea-frame-idx input');
             if(el){{el.value=v;el.dispatchEvent(new Event('input',{{bubbles:true}}))}}
         ">"""
 
@@ -122,45 +122,9 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             end_clean = end_utc.replace(":", "")
             log(f"Time range: {start_clean}-{end_clean} UTC on {date_compact}")
 
-            log("Downloading satellite tiles...")
-            yield partial(info=info)
-
-            frames = sat_client.fetch_event(
-                satellite=satellite, product=product,
-                date=date_compact, start_utc=start_clean, end_utc=end_clean,
-                lat=lat, lon=lon, zoom=int(zoom), bbox_deg=20.0,
-                on_progress=log,
-            )
-            log(f"Downloaded {len(frames)} satellite frames")
-            yield partial(info=info)
-
-            log("Rendering map views...")
-            yield partial(info=info)
-
-            composed = []
-            labels = []
-            for i, frame in enumerate(frames):
-                ts_str = str(frame["timestamp"])
-                ts_fmt = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]} {ts_str[8:10]}:{ts_str[10:12]} UTC"
-                img = compose_frame(
-                    satellite_image=frame["image"], timestamp=ts_fmt,
-                    satellite_name=satellite["name"], location_str=display,
-                    sat_lon=satellite["lon"], center_lat=lat, center_lon=lon,
-                    bbox_deg=20.0, tile_bounds=frame.get("tile_bounds"), zoom=frame.get("zoom"),
-                )
-                composed.append(img)
-                labels.append(ts_fmt)
-                log(f"  Rendered frame {i+1}/{len(frames)}")
-                if i == 0:
-                    yield partial(image=img, timeline=_build_timeline_html(labels, 0), info=info)
-
-            state["composed_frames"] = composed
-            state["frame_labels"] = labels
-
+            # 1. Atmosphere data (fast JSON API)
             log("Fetching atmosphere data...")
-            tl_html = _build_timeline_html(labels, 0) if labels else "<div></div>"
-            first_img = composed[0] if composed else None
-            yield partial(image=first_img, timeline=tl_html, info=info)
+            yield partial(info=info)
 
             atmo = atmo_client.fetch(lat, lon, date)
             log(f"Atmosphere: {atmo['source']} ({len(atmo['timestamps'])} hours)")
@@ -168,10 +132,11 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             cape_fig = create_atmosphere_chart(atmo, "cape_cin")
             temp_fig = create_atmosphere_chart(atmo, "temp_dewpoint")
             wind_fig = create_atmosphere_chart(atmo, "wind")
-            yield partial(image=first_img, timeline=tl_html, cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info)
+            yield partial(cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info)
 
+            # 2. Alerts (fast API calls)
             log("Fetching severe weather alerts...")
-            yield partial(image=first_img, timeline=tl_html, cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info)
+            yield partial(cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info)
 
             start_h = int(start_clean) if start_clean else 0
             end_h = int(end_clean) if end_clean else 2359
@@ -206,6 +171,47 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                     intensity_text[:30], gps, a.get("source", ""),
                     a.get("valid_from", "")[:16], a.get("valid_to", "")[:16],
                 ])
+
+            yield partial(cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info, alerts=alerts_data)
+
+            # 3. Satellite tiles (slow, many HTTP requests)
+            log("Downloading satellite tiles...")
+            yield partial(cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info, alerts=alerts_data)
+
+            frames = sat_client.fetch_event(
+                satellite=satellite, product=product,
+                date=date_compact, start_utc=start_clean, end_utc=end_clean,
+                lat=lat, lon=lon, zoom=int(zoom), bbox_deg=20.0,
+                on_progress=log,
+            )
+            log(f"Downloaded {len(frames)} satellite frames")
+
+            # 4. Render map views (slow, cartopy rendering)
+            log("Rendering map views...")
+            yield partial(cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info, alerts=alerts_data)
+
+            composed = []
+            labels = []
+            for i, frame in enumerate(frames):
+                ts_str = str(frame["timestamp"])
+                ts_fmt = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]} {ts_str[8:10]}:{ts_str[10:12]} UTC"
+                img = compose_frame(
+                    satellite_image=frame["image"], timestamp=ts_fmt,
+                    satellite_name=satellite["name"], location_str=display,
+                    sat_lon=satellite["lon"], center_lat=lat, center_lon=lon,
+                    bbox_deg=20.0, tile_bounds=frame.get("tile_bounds"), zoom=frame.get("zoom"),
+                )
+                composed.append(img)
+                labels.append(ts_fmt)
+                log(f"  Rendered frame {i+1}/{len(frames)}")
+                if i == 0:
+                    yield partial(image=img, timeline=_build_timeline_html(labels, 0),
+                                  cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info, alerts=alerts_data)
+
+            state["composed_frames"] = composed
+            state["frame_labels"] = labels
+            tl_html = _build_timeline_html(labels, 0) if labels else "<div></div>"
+            first_img = composed[0] if composed else None
 
             log("Done.")
             yield partial(image=first_img, timeline=tl_html, cape=cape_fig, temp=temp_fig, wind=wind_fig, info=info, alerts=alerts_data)
@@ -247,7 +253,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             with gr.Column(scale=2):
                 sat_image = gr.Image(label="Satellite Imagery", type="pil", height=500)
                 timeline_html = gr.HTML(value="<div style='height:50px'></div>")
-                frame_idx = gr.Number(value=0, visible=False, precision=0)
+                frame_idx = gr.Number(value=0, visible=False, precision=0, elem_id="wea-frame-idx")
 
         with gr.Row():
             cape_plot = gr.Plot(label="CAPE / CIN")
