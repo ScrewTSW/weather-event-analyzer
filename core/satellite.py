@@ -54,14 +54,17 @@ def _gibs_wms_url(layer: str, time_str: str, bbox: tuple, width: int = 512, heig
     )
 
 
-def _eumetsat_wms_url(layer: str, bbox: tuple, width: int = 512, height: int = 512) -> str:
+def _eumetsat_wms_url(layer: str, bbox: tuple, width: int = 512, height: int = 512, time_str: str = None) -> str:
     west, south, east, north = bbox
-    return (
+    url = (
         f"{EUMETSAT_WMS}?service=WMS&version=1.1.1&request=GetMap"
-        f"&layers={layer}&format=image/png&transparent=true"
+        f"&layers={layer}&format=image/jpeg"
         f"&width={width}&height={height}&srs=EPSG:4326"
         f"&bbox={west},{south},{east},{north}"
     )
+    if time_str:
+        url += f"&time={time_str}"
+    return url
 
 
 def _generate_timestamps(date: str, start_utc: str, end_utc: str, cadence_min: int) -> list[str]:
@@ -104,7 +107,7 @@ class SatelliteClient:
         return None
 
     def fetch_wms_image(self, source: dict, time_str: str, lat: float, lon: float,
-                        bbox_deg: float = 20.0, size: int = 800) -> Optional[Image.Image]:
+                        bbox_deg: float = 20.0, size: int = 1024) -> Optional[Image.Image]:
         half = bbox_deg / 2
         north = min(lat + half, 65.0)
         south = max(lat - half, -65.0)
@@ -115,7 +118,7 @@ class SatelliteClient:
         if src_type == "gibs_wms":
             url = _gibs_wms_url(layer, time_str, bbox, size, size)
         elif src_type == "eumetsat_wms":
-            url = _eumetsat_wms_url(layer, bbox, size, size)
+            url = _eumetsat_wms_url(layer, bbox, size, size, time_str=time_str)
         else:
             return None
 
