@@ -256,6 +256,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             inputs=[location_input, date_input, start_input, end_input, zoom_slider, product_dd],
             outputs=[sat_image, timeline, cape_plot, temp_plot, wind_plot,
                      resolved, status_log, alerts_table],
+            show_progress="hidden",
         )
         timeline.change(
             fn=on_frame_change,
