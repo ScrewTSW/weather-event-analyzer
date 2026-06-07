@@ -38,7 +38,9 @@ class TestGDACSClient:
                         "url": {
                             "report": "https://www.gdacs.org/report.aspx?eventid=1234"
                         },
-                        "severity": "Red"
+                        "alertlevel": "Red",
+                        "alertscore": 3.5,
+                        "severitydata": {"severity": 7.5, "severitytext": "Magnitude 7.5M, Depth:10km", "severityunit": "M"}
                     },
                     "geometry": {
                         "type": "Point",
@@ -79,7 +81,8 @@ class TestGDACSClient:
                         "fromdate": "2026-05-30T00:00:00",
                         "todate": "2026-06-02T00:00:00",
                         "url": {"report": "https://example.com"},
-                        "severity": "Orange"
+                        "alertlevel": "Orange",
+                        "severitydata": {"severity": 4, "severitytext": "Category 4", "severityunit": "cat"}
                     },
                     "geometry": None
                 }

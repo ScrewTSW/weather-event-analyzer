@@ -89,27 +89,38 @@ class GDACSClient:
         }
         event_type = event_type_map.get(props.get("eventtype", ""), "unknown")
 
-        # Map GDACS severity to standard severity
         severity_map = {
             "Red": "extreme",
             "Orange": "severe",
             "Green": "moderate"
         }
-        severity = severity_map.get(props.get("severity", "Green"), "moderate")
+        severity = severity_map.get(props.get("alertlevel", "Green"), "moderate")
+
+        sev_data = props.get("severitydata", {}) or {}
+        geo = feature.get("geometry", {}) or {}
+        coords = geo.get("coordinates", [None, None])
+
+        title = props.get("name") or props.get("eventname") or f"{event_type.title()} in {props.get('country', 'Unknown')}"
 
         return {
             "event_type": event_type,
             "severity": severity,
-            "title": props.get("name", "Unknown Event"),
+            "title": title,
             "description": props.get("description", ""),
-            "geometry": feature.get("geometry"),
+            "geometry": geo,
             "valid_from": props.get("fromdate", ""),
             "valid_to": props.get("todate", ""),
-            "source_url": props.get("url", {}).get("report", ""),
+            "source_url": props.get("url", {}).get("report", "") if isinstance(props.get("url"), dict) else "",
             "properties": {
                 "event_id": props.get("eventid"),
                 "episode_id": props.get("episodeid"),
                 "country": props.get("country", ""),
+                "intensity": sev_data.get("severity", ""),
+                "intensity_text": sev_data.get("severitytext", ""),
+                "intensity_unit": sev_data.get("severityunit", ""),
+                "alert_score": props.get("alertscore", ""),
+                "lat": coords[1] if len(coords) > 1 else None,
+                "lon": coords[0] if len(coords) > 0 else None,
             }
         }
 

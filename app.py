@@ -1,7 +1,5 @@
 # app.py
-import tempfile
 from pathlib import Path
-from typing import Optional
 
 import gradio as gr
 import matplotlib
@@ -21,8 +19,10 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
     sat_client = SatelliteClient(cache)
     atmo_client = OpenMeteoClient()
 
-    # Shared state
-    state = {"frames": [], "atmo_data": None, "lat": None, "lon": None, "satellite": None}
+    state = {
+        "composed_frames": [],
+        "frame_labels": [],
+    }
 
     def fetch_data(location_str, date, start_utc, end_utc, zoom, product):
         log_lines = []
@@ -31,7 +31,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
         try:
             if not location_str or not location_str.strip():
-                return [], None, None, None, "", "ERROR: Enter a location", []
+                return None, gr.update(), None, None, None, "", "ERROR: Enter a location", []
 
             from datetime import datetime, timedelta
             try:
@@ -43,19 +43,14 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             if not date or not date.strip():
                 date = now.strftime("%Y-%m-%d")
                 log(f"Using today: {date}")
-
             if not start_utc or not start_utc.strip():
-                two_hours_ago = now - timedelta(hours=2)
-                start_utc = two_hours_ago.strftime("%H:%M")
+                start_utc = (now - timedelta(hours=2)).strftime("%H:%M")
                 log(f"Start defaulted to 2h ago: {start_utc} UTC")
             if not end_utc or not end_utc.strip():
                 end_utc = now.strftime("%H:%M")
                 log(f"End defaulted to now: {end_utc} UTC")
 
             lat, lon, display, satellite = resolve_location(location_str)
-            state["lat"] = lat
-            state["lon"] = lon
-            state["satellite"] = satellite
             log(f"Location: {display}")
             log(f"Satellite: {satellite['name']} ({satellite['slider_id']})")
 
@@ -75,16 +70,12 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                 bbox_deg=20.0,
                 on_progress=log,
             )
-            state["frames"] = frames
             log(f"Downloaded {len(frames)} satellite frames")
 
-            # Fetch atmosphere data
             log("Fetching atmosphere data...")
             atmo = atmo_client.fetch(lat, lon, date)
-            state["atmo_data"] = atmo
             log(f"Atmosphere data: {atmo['source']} ({len(atmo['timestamps'])} hours)")
 
-            # Fetch alerts for the event time window
             log("Fetching severe weather alerts...")
             start_h = int(start_clean) if start_clean else 0
             end_h = int(end_clean) if end_clean else 2359
@@ -97,61 +88,88 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             alerts_data = []
             for a in alerts:
                 props = a.get("properties", {})
-                intensity = props.get("magnitude", props.get("wind_speed", props.get("alertscore", "")))
-                location = props.get("country", props.get("region", ""))
-                if not location and "in " in a.get("title", ""):
-                    location = a["title"].split("in ", 1)[-1][:30]
+                intensity_text = props.get("intensity_text", "")
+                if not intensity_text:
+                    intensity_val = props.get("intensity", props.get("f_scale", props.get("speed", props.get("size", ""))))
+                    intensity_unit = props.get("intensity_unit", "")
+                    intensity_text = f"{intensity_val} {intensity_unit}".strip() if intensity_val else ""
+                alert_lat = props.get("lat", "")
+                alert_lon = props.get("lon", "")
+                geo = a.get("geometry") or {}
+                if not alert_lat and geo.get("coordinates"):
+                    coords = geo["coordinates"]
+                    alert_lon, alert_lat = coords[0], coords[1]
+                gps = f"{alert_lat}, {alert_lon}" if alert_lat and alert_lon else ""
                 alerts_data.append([
                     a["severity"].upper(),
                     a["event_type"],
                     a["title"][:60],
-                    str(intensity),
-                    location[:25],
+                    intensity_text[:30],
+                    gps,
                     a.get("source", ""),
                     a.get("valid_from", "")[:16],
                     a.get("valid_to", "")[:16],
                 ])
 
-            # Build gallery images using compose_frame for proper layer compositing
-            gallery = []
+            # Compose frames with all layers
+            composed = []
+            labels = []
             for frame in frames:
                 ts_str = str(frame["timestamp"])
-                ts_formatted = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]} {ts_str[8:10]}:{ts_str[10:12]} UTC"
-                # Use compose_frame to render all layers (satellite + marker + label)
-                composed = compose_frame(
+                ts_fmt = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]} {ts_str[8:10]}:{ts_str[10:12]} UTC"
+                img = compose_frame(
                     satellite_image=frame["image"],
-                    timestamp=ts_formatted,
+                    timestamp=ts_fmt,
                     satellite_name=satellite["name"],
                     location_str=display,
                     center_x=frame["image"].width // 2,
                     center_y=frame["image"].height // 2,
                 )
-                gallery.append(composed)
+                composed.append(img)
+                labels.append(ts_fmt)
 
-            # Build charts
+            state["composed_frames"] = composed
+            state["frame_labels"] = labels
+
+            # Charts
             cape_fig = create_atmosphere_chart(atmo, "cape_cin")
             temp_fig = create_atmosphere_chart(atmo, "temp_dewpoint")
             wind_fig = create_atmosphere_chart(atmo, "wind")
 
             info = f"{display}\n{satellite['name']} ({satellite['slider_id']})"
 
-            return gallery, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data
+            # Show first frame, update slider range
+            first_img = composed[0] if composed else None
+            slider_update = gr.update(minimum=0, maximum=max(0, len(composed) - 1), value=0, step=1,
+                                       label=f"Time: {labels[0]}" if labels else "Time")
+
+            return first_img, slider_update, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data
 
         except Exception as e:
+            import traceback
             log_lines.append(f"ERROR: {e}")
-            return [], None, None, None, "", "\n".join(log_lines), []
+            log_lines.append(traceback.format_exc())
+            return None, gr.update(), None, None, None, "", "\n".join(log_lines), []
+
+    def update_frame(frame_idx):
+        idx = int(frame_idx)
+        frames = state["composed_frames"]
+        labels = state["frame_labels"]
+        if not frames or idx >= len(frames):
+            return None, "Time"
+        return frames[idx], f"Time: {labels[idx]}"
 
     with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
 
         with gr.Row():
             with gr.Column(scale=1):
-                location_input = gr.Textbox(label="Location", placeholder="City name or lat,lon (e.g. 45.75, 126.65)")
+                location_input = gr.Textbox(label="Location", placeholder="City name or lat,lon")
                 date_input = gr.Textbox(label="Date (YYYY-MM-DD)", placeholder="2026-05-31")
                 with gr.Row():
                     start_input = gr.Textbox(label="Start UTC", placeholder="07:00", scale=1)
                     end_input = gr.Textbox(label="End UTC", placeholder="12:00", scale=1)
-                zoom_slider = gr.Slider(minimum=0, maximum=4, step=1, value=2, label="Zoom Level")
+                zoom_slider = gr.Slider(minimum=0, maximum=4, step=1, value=2, label="Zoom (0=wide, 4=close)")
                 product_dropdown = gr.Dropdown(
                     choices=["geocolor", "band_13", "band_08"],
                     value="geocolor",
@@ -161,7 +179,8 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                 fetch_btn = gr.Button("Fetch Data", variant="primary")
 
             with gr.Column(scale=2):
-                gallery = gr.Gallery(label="Satellite Imagery", columns=2, height=600, object_fit="contain")
+                sat_image = gr.Image(label="Satellite Imagery", type="pil", height=550)
+                time_slider = gr.Slider(minimum=0, maximum=0, step=1, value=0, label="Time")
 
         with gr.Row():
             cape_plot = gr.Plot(label="CAPE / CIN")
@@ -169,17 +188,23 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             wind_plot = gr.Plot(label="Wind Speed")
 
         alerts_table = gr.Dataframe(
-            headers=["Severity", "Event", "Title", "Intensity", "Location", "Source", "From", "To"],
+            headers=["Severity", "Event", "Title", "Intensity", "GPS", "Source", "From", "To"],
             label="Active Severe Weather Alerts",
             wrap=True,
         )
 
-        status_log = gr.Textbox(label="Status Log", lines=8, interactive=False)
+        status_log = gr.Textbox(label="Status Log", lines=6, interactive=False)
 
         fetch_btn.click(
             fn=fetch_data,
             inputs=[location_input, date_input, start_input, end_input, zoom_slider, product_dropdown],
-            outputs=[gallery, cape_plot, temp_plot, wind_plot, resolved_info, status_log, alerts_table],
+            outputs=[sat_image, time_slider, cape_plot, temp_plot, wind_plot, resolved_info, status_log, alerts_table],
+        )
+
+        time_slider.change(
+            fn=update_frame,
+            inputs=[time_slider],
+            outputs=[sat_image, time_slider],
         )
 
     return app
