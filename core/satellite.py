@@ -166,6 +166,15 @@ class SatelliteClient:
         if on_progress:
             on_progress(f"Found {len(timestamps)} frames, {len(tiles_needed)} tiles each")
 
+        # Compute the geostationary extent for the tile set
+        if tiles_needed:
+            min_tx = min(tx for tx, ty in tiles_needed)
+            min_ty = min(ty for tx, ty in tiles_needed)
+            max_tx = max(tx for tx, ty in tiles_needed)
+            max_ty = max(ty for tx, ty in tiles_needed)
+        else:
+            return []
+
         results = []
         for i, ts in enumerate(timestamps):
             if on_progress:
@@ -173,17 +182,13 @@ class SatelliteClient:
 
             composite = self.download_and_stitch(sat_id, product, ts, zoom, tiles_needed)
             if composite:
-                try:
-                    crop = get_crop_bounds(lat, lon, bbox_deg, zoom, sat_lon)
-                    cropped = composite.crop(crop)
-                except (ValueError, Exception):
-                    cropped = composite
-
                 results.append({
                     "timestamp": ts,
-                    "image": cropped,
+                    "image": composite,
                     "satellite": sat_id,
                     "product": product,
+                    "zoom": zoom,
+                    "tile_bounds": (min_tx, min_ty, max_tx, max_ty),
                 })
 
         return results

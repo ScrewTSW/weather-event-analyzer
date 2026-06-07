@@ -152,12 +152,48 @@ def add_location_marker(img, center_x, center_y, color=(0, 255, 255, 255), size=
     return result
 
 
+def _tile_extent_to_geo(tile_bounds, zoom, sat_height=35786000):
+    """Convert tile bounds to geostationary projection coordinates (meters).
+
+    The full disk at a given zoom level is TILE_SIZE * 2^zoom pixels.
+    In geostationary CRS, the full disk spans from -max_x to +max_x.
+    max_x = sat_height * tan(asin(R_eq / (R_eq + sat_height)))
+    which is approximately sat_height * sin(angular_radius).
+    """
+    from core.projection import TILE_SIZE
+    R_EQ = 6378137.0  # meters
+    full_extent = sat_height * np.sin(np.arcsin(R_EQ / (R_EQ + sat_height)))
+
+    image_size = TILE_SIZE * (2 ** zoom)
+    min_tx, min_ty, max_tx, max_ty = tile_bounds
+
+    # Pixel ranges in full-disk space
+    px_left = min_tx * TILE_SIZE
+    px_right = (max_tx + 1) * TILE_SIZE
+    px_top = min_ty * TILE_SIZE
+    px_bottom = (max_ty + 1) * TILE_SIZE
+
+    # Map pixels to geostationary coordinates
+    # full_extent covers half the image (center to edge)
+    # The disk center is at image_size/2
+    center = image_size / 2.0
+    scale = full_extent / (center * 0.45)  # match fill_fraction from projection.py
+
+    geo_left = (px_left - center) * scale
+    geo_right = (px_right - center) * scale
+    geo_top = (center - px_top) * scale      # y is flipped
+    geo_bottom = (center - px_bottom) * scale
+
+    return (geo_left, geo_right, geo_bottom, geo_top)
+
+
 def reproject_geostationary(satellite_image, sat_lon, center_lat, center_lon,
-                            bbox_deg=20.0, output_size=(800, 600)):
+                            bbox_deg=20.0, output_size=(900, 700),
+                            tile_bounds=None, zoom=None):
     """Reproject geostationary satellite image onto a flat map with coastlines.
 
-    Takes raw geostationary crop and renders it on a PlateCarree map so it
-    looks like a normal overhead view regardless of satellite viewing angle.
+    Uses tile_bounds and zoom to compute the exact geostationary extent of the
+    image (which piece of the full disk it represents).
     """
     if not HAS_CARTOPY:
         return satellite_image
@@ -173,15 +209,19 @@ def reproject_geostationary(satellite_image, sat_lon, center_lat, center_lon,
     ax.set_extent([center_lon - half, center_lon + half,
                    center_lat - half, center_lat + half], crs=map_crs)
 
+    # Compute proper geostationary extent from tile coordinates
+    if tile_bounds is not None and zoom is not None:
+        extent = _tile_extent_to_geo(tile_bounds, zoom)
+    else:
+        extent = geo_crs.x_limits + geo_crs.y_limits
+
     ax.imshow(img_array, origin='upper', transform=geo_crs,
-              extent=geo_crs.x_limits + geo_crs.y_limits,
-              interpolation='bilinear')
+              extent=extent, interpolation='bilinear')
 
     ax.coastlines(resolution='50m', color='cyan', linewidth=0.8, alpha=0.7)
     ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5)
     ax.add_feature(cfeature.LAKES, facecolor='none', edgecolor='cyan', linewidth=0.3, alpha=0.4)
 
-    # Target location marker
     ax.plot(center_lon, center_lat, '+', color='yellow', markersize=12,
             markeredgewidth=2, transform=map_crs, zorder=10)
 
@@ -195,7 +235,7 @@ def reproject_geostationary(satellite_image, sat_lon, center_lat, center_lon,
 
 def compose_frame(satellite_image, timestamp, satellite_name, location_str,
                   center_x=None, center_y=None, sat_lon=None, center_lat=None,
-                  center_lon=None, bbox_deg=20.0):
+                  center_lon=None, bbox_deg=20.0, tile_bounds=None, zoom=None):
     """Compose all layers into a single frame.
 
     This is the central compositing pipeline for timelapse generation.
@@ -215,11 +255,11 @@ def compose_frame(satellite_image, timestamp, satellite_name, location_str,
     Returns:
         PIL Image (RGBA) - fully composited frame
     """
-    # Layer 1: Reproject if we have satellite coordinates
     if sat_lon is not None and center_lat is not None and center_lon is not None and HAS_CARTOPY:
         frame = reproject_geostationary(
             satellite_image, sat_lon, center_lat, center_lon,
-            bbox_deg=bbox_deg, output_size=(900, 700))
+            bbox_deg=bbox_deg, output_size=(900, 700),
+            tile_bounds=tile_bounds, zoom=zoom)
     else:
         if satellite_image.mode != "RGBA":
             frame = satellite_image.convert("RGBA")

@@ -126,6 +126,8 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                     center_lat=lat,
                     center_lon=lon,
                     bbox_deg=20.0,
+                    tile_bounds=frame.get("tile_bounds"),
+                    zoom=frame.get("zoom"),
                 )
                 composed.append(img)
                 labels.append(ts_fmt)
