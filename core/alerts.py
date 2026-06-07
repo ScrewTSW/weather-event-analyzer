@@ -8,9 +8,10 @@ Supports both real-time (current alerts) and historical (alerts active at a give
 import csv
 import io
 import logging
+import threading
 import time
 from datetime import datetime, timedelta
-from typing import Optional
+from typing import Callable, Optional
 from xml.etree import ElementTree as ET
 
 import requests
@@ -32,14 +33,13 @@ class GDACSClient:
         self.session.headers["User-Agent"] = USER_AGENT
 
     def fetch_current_alerts(self) -> dict:
-        """Fetch current active alerts (last 7 days)."""
+        """Fetch current active alerts (last 48 hours only)."""
         try:
-            # Python 3.11+ has datetime.UTC
             from datetime import UTC
             to_date = datetime.now(UTC).replace(tzinfo=None)
         except ImportError:
             to_date = datetime.utcnow()
-        from_date = to_date - timedelta(days=7)
+        from_date = to_date - timedelta(hours=48)
         return self.fetch_historical_alerts(
             from_date.strftime("%Y-%m-%d"),
             to_date.strftime("%Y-%m-%d")
@@ -767,9 +767,8 @@ def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[li
             if source == "gdacs":
                 client = GDACSClient()
                 if is_historical:
-                    # Fetch 7 days around the target date
-                    from_date = (dt - timedelta(days=3)).strftime("%Y-%m-%d")
-                    to_date = (dt + timedelta(days=3)).strftime("%Y-%m-%d")
+                    from_date = (dt - timedelta(hours=24)).strftime("%Y-%m-%d")
+                    to_date = (dt + timedelta(hours=24)).strftime("%Y-%m-%d")
                     result = client.fetch_historical_alerts(from_date, to_date)
                 else:
                     result = client.fetch_current_alerts()
@@ -785,8 +784,8 @@ def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[li
             elif source == "ibtracs":
                 client = IBTrACSClient()
                 if is_historical:
-                    from_date = (dt - timedelta(days=7)).strftime("%Y-%m-%d")
-                    to_date = (dt + timedelta(days=7)).strftime("%Y-%m-%d")
+                    from_date = (dt - timedelta(hours=48)).strftime("%Y-%m-%d")
+                    to_date = (dt + timedelta(hours=48)).strftime("%Y-%m-%d")
                     result = client.fetch_historical_alerts(from_date, to_date)
                 else:
                     result = client.fetch_current_alerts()
@@ -820,3 +819,70 @@ def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[li
     all_alerts.sort(key=lambda a: severity_order.get(a["severity"], 4))
 
     return all_alerts
+
+
+class AlertPoller:
+    """Polls for new alerts at a configurable interval and calls a callback when new ones appear."""
+
+    def __init__(
+        self,
+        lat: float,
+        lon: float,
+        on_new_alerts: Callable[[list[dict]], None],
+        interval_seconds: int = 60,
+        sources: Optional[list[str]] = None,
+    ):
+        self.lat = lat
+        self.lon = lon
+        self.on_new_alerts = on_new_alerts
+        self.interval = interval_seconds
+        self.sources = sources
+        self._seen_keys: set[str] = set()
+        self._thread: Optional[threading.Thread] = None
+        self._stop_event = threading.Event()
+
+    def _alert_key(self, alert: dict) -> str:
+        return f"{alert.get('source', '')}:{alert.get('event_type', '')}:{alert.get('title', '')}:{alert.get('valid_from', '')}"
+
+    def _poll_once(self):
+        try:
+            from datetime import UTC
+            now_str = datetime.now(UTC).replace(tzinfo=None).isoformat()
+        except ImportError:
+            now_str = datetime.utcnow().isoformat()
+
+        alerts = fetch_alerts(self.lat, self.lon, now_str, sources=self.sources)
+
+        new_alerts = []
+        for alert in alerts:
+            key = self._alert_key(alert)
+            if key not in self._seen_keys:
+                self._seen_keys.add(key)
+                new_alerts.append(alert)
+
+        if new_alerts:
+            self.on_new_alerts(new_alerts)
+
+    def _run(self):
+        while not self._stop_event.is_set():
+            self._poll_once()
+            self._stop_event.wait(self.interval)
+
+    def start(self):
+        if self._thread and self._thread.is_alive():
+            return
+        self._stop_event.clear()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+        self._thread.start()
+        logger.info(f"Alert poller started: {self.interval}s interval, ({self.lat}, {self.lon})")
+
+    def stop(self):
+        self._stop_event.set()
+        if self._thread:
+            self._thread.join(timeout=5)
+        logger.info("Alert poller stopped")
+
+    def update_location(self, lat: float, lon: float):
+        self.lat = lat
+        self.lon = lon
+        self._seen_keys.clear()
