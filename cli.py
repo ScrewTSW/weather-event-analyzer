@@ -3,7 +3,7 @@ import argparse
 import sys
 from pathlib import Path
 
-from core.cache import Cache
+from core.cache import Cache, default_cache_dir
 from core.location import resolve_location
 from core.satellite import SatelliteClient
 from core.atmosphere import OpenMeteoClient
@@ -48,7 +48,7 @@ def add_subparsers(subparsers):
 
 
 def run_cli(args):
-    cache = Cache("./cache", max_size_gb=getattr(args, "cache_max", 5.0))
+    cache = Cache(str(default_cache_dir()), max_size_gb=getattr(args, "cache_max", 5.0))
 
     if args.command == "satellite":
         _run_satellite(args, cache)

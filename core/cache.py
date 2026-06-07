@@ -1,8 +1,21 @@
 import json
 import os
+import sys
 import time
 from pathlib import Path
 from typing import Optional
+
+APP_NAME = "weather-event-analyzer"
+
+
+def default_cache_dir() -> Path:
+    if sys.platform == "win32":
+        base = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData" / "Local"))
+    elif sys.platform == "darwin":
+        base = Path.home() / "Library" / "Caches"
+    else:
+        base = Path(os.environ.get("XDG_CACHE_HOME", Path.home() / ".cache"))
+    return base / APP_NAME
 
 
 class Cache:

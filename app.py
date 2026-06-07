@@ -7,7 +7,7 @@ import gradio as gr
 import matplotlib
 matplotlib.use("Agg")
 
-from core.cache import Cache
+from core.cache import Cache, default_cache_dir
 from core.location import resolve_location
 from core.satellite import SatelliteClient
 from core.atmosphere import OpenMeteoClient
@@ -16,7 +16,7 @@ from core.visualize import compose_frame, create_atmosphere_chart, create_timela
 
 
 def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
-    cache_dir = Path("./cache")
+    cache_dir = default_cache_dir()
     cache = Cache(str(cache_dir), max_size_gb=cache_max_gb)
     sat_client = SatelliteClient(cache)
     atmo_client = OpenMeteoClient()
