@@ -11,6 +11,7 @@ from core.cache import Cache
 from core.location import resolve_location
 from core.satellite import SatelliteClient
 from core.atmosphere import OpenMeteoClient
+from core.alerts import fetch_alerts
 from core.visualize import compose_frame, create_atmosphere_chart, create_timelapse_gif
 
 
@@ -57,6 +58,27 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             state["atmo_data"] = atmo
             log(f"Atmosphere data: {atmo['source']} ({len(atmo['timestamps'])} hours)")
 
+            # Fetch alerts for the event time window
+            log("Fetching severe weather alerts...")
+            start_h = int(start_utc.replace(":", ""))
+            end_h = int(end_utc.replace(":", ""))
+            mid_h = str((start_h + end_h) // 2).zfill(4)
+            alert_time = f"{date}T{mid_h[:2]}:{mid_h[2:]}:00"
+            alerts = fetch_alerts(lat, lon, alert_time)
+            log(f"Found {len(alerts)} alerts")
+
+            # Format alerts for dataframe
+            alerts_data = []
+            for a in alerts:
+                alerts_data.append([
+                    a["severity"].upper(),
+                    a["event_type"],
+                    a["title"][:80],
+                    a.get("source", ""),
+                    a.get("valid_from", "")[:19],
+                    a.get("valid_to", "")[:19],
+                ])
+
             # Build gallery images using compose_frame for proper layer compositing
             gallery = []
             for frame in frames:
@@ -80,11 +102,11 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
             info = f"{display}\n{satellite['name']} ({satellite['slider_id']})"
 
-            return gallery, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines)
+            return gallery, cape_fig, temp_fig, wind_fig, info, "\n".join(log_lines), alerts_data
 
         except Exception as e:
             log_lines.append(f"ERROR: {e}")
-            return [], None, None, None, "", "\n".join(log_lines)
+            return [], None, None, None, "", "\n".join(log_lines), []
 
     with gr.Blocks(title="Weather Event Analyzer", theme=gr.themes.Soft()) as app:
         gr.Markdown("# Weather Event Analyzer")
@@ -113,12 +135,18 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             temp_plot = gr.Plot(label="Temperature / Dewpoint")
             wind_plot = gr.Plot(label="Wind Speed")
 
+        alerts_table = gr.Dataframe(
+            headers=["Severity", "Event", "Title", "Source", "From", "To"],
+            label="Active Severe Weather Alerts",
+            wrap=True,
+        )
+
         status_log = gr.Textbox(label="Status Log", lines=8, interactive=False)
 
         fetch_btn.click(
             fn=fetch_data,
             inputs=[location_input, date_input, start_input, end_input, zoom_slider, product_dropdown],
-            outputs=[gallery, cape_plot, temp_plot, wind_plot, resolved_info, status_log],
+            outputs=[gallery, cape_plot, temp_plot, wind_plot, resolved_info, status_log, alerts_table],
         )
 
     return app

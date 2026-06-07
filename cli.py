@@ -40,6 +40,12 @@ def add_subparsers(subparsers):
     all_parser.add_argument("--product", default="geocolor", help="SLIDER product")
     all_parser.add_argument("--output", default="./output", help="Output directory")
 
+    # alerts subcommand
+    alerts_parser = subparsers.add_parser("alerts", help="Fetch severe weather alerts")
+    alerts_parser.add_argument("--location", required=True, help="City name or lat,lon")
+    alerts_parser.add_argument("--date", help="Date YYYY-MM-DD (default: now)")
+    alerts_parser.add_argument("--time", help="Time HH:MM UTC (default: now)")
+
 
 def run_cli(args):
     cache = Cache("./cache", max_size_gb=getattr(args, "cache_max", 5.0))
@@ -50,6 +56,8 @@ def run_cli(args):
         _run_atmosphere(args, cache)
     elif args.command == "all":
         _run_all(args, cache)
+    elif args.command == "alerts":
+        _run_alerts(args, cache)
     else:
         print(f"Unknown command: {args.command}", file=sys.stderr)
         sys.exit(1)
@@ -145,3 +153,37 @@ def _run_all(args, cache):
     args.bbox = getattr(args, "bbox", 5.0)
     _run_satellite(args, cache)
     _run_atmosphere(args, cache)
+
+
+def _run_alerts(args, cache):
+    lat, lon, display, _ = resolve_location(args.location)
+    print(f"Location: {display}")
+
+    from core.alerts import fetch_alerts
+    from datetime import datetime, UTC
+
+    if args.date and args.time:
+        dt_str = f"{args.date}T{args.time}:00"
+    elif args.date:
+        dt_str = f"{args.date}T12:00:00"
+    else:
+        dt_str = datetime.now(UTC).replace(tzinfo=None).isoformat()
+
+    print(f"Querying alerts for: {dt_str}")
+    alerts = fetch_alerts(lat, lon, dt_str)
+
+    if not alerts:
+        print("No active alerts found.")
+        return
+
+    print(f"\n{'='*80}")
+    print(f"Found {len(alerts)} alerts:")
+    print(f"{'='*80}")
+    for a in alerts:
+        severity = a['severity'].upper()
+        marker = {'EXTREME': '!!!', 'SEVERE': '!! ', 'MODERATE': '!  ', 'MINOR': '   '}.get(severity, '   ')
+        print(f"\n{marker} [{severity}] {a['event_type']}")
+        print(f"    {a['title']}")
+        if a.get('valid_from'):
+            print(f"    From: {a['valid_from'][:19]}  To: {a.get('valid_to', 'ongoing')[:19]}")
+        print(f"    Source: {a.get('source', 'unknown')}")
