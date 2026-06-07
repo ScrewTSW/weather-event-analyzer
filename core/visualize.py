@@ -201,7 +201,11 @@ def render_map_view(center_lat, center_lon, bbox_deg=20.0, date=None,
     ax.set_extent([center_lon - half, center_lon + half,
                    center_lat - half, center_lat + half], crs=map_crs)
 
-    # Try to fetch GIBS MODIS tiles for this area
+    # Base layers as fallback background
+    ax.add_feature(cfeature.OCEAN, facecolor='#1a2a3a', zorder=0)
+    ax.add_feature(cfeature.LAND, facecolor='#2a3a2a', zorder=0)
+
+    # Fetch GIBS MODIS/VIIRS tiles
     gibs_zoom = 4  # ~2km/pixel, good for 20-degree bbox
     if bbox_deg <= 10:
         gibs_zoom = 5
