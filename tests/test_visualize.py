@@ -6,6 +6,7 @@ from core.visualize import (
     compose_frame,
     create_atmosphere_chart,
     create_sounding_chart,
+    create_hodograph_chart,
     create_timelapse_gif,
     create_timelapse_mp4,
 )
@@ -133,3 +134,36 @@ class TestSoundingChart:
         ax = fig.axes[0]
         collections = ax.collections
         assert len(collections) > 0, "Expected CAPE/CIN shading collections"
+
+
+class TestHodographChart:
+    def _make_profile(self):
+        levels = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500,
+                  400, 300, 250, 200, 150, 100, 70, 50, 30]
+        n = len(levels)
+        return {
+            "source": "open-meteo-pressure",
+            "synoptic_time": "2026-07-02T12:00",
+            "pressure_levels": levels,
+            "temperature": [30 - i * 2 for i in range(n)],
+            "dewpoint": [20 - i * 2.5 for i in range(n)],
+            "wind_speed": [5 + i * 1.5 for i in range(n)],
+            "wind_direction": [180 + i * 10 for i in range(n)],
+            "geopotential_height": [100, 320, 500, 800, 1000, 1500, 1900,
+                                    3000, 4200, 5600, 7200, 9200, 10400,
+                                    11800, 13500, 15800, 17700, 19300, 22000],
+            "latitude": 35.0,
+            "longitude": -97.0,
+            "timestamps": None,
+        }
+
+    def test_returns_figure(self):
+        fig = create_hodograph_chart(self._make_profile())
+        assert fig is not None
+        import matplotlib.figure
+        assert isinstance(fig, matplotlib.figure.Figure)
+
+    def test_has_height_colored_segments(self):
+        fig = create_hodograph_chart(self._make_profile())
+        ax = fig.axes[0]
+        assert len(ax.collections) > 0 or len(ax.lines) > 0

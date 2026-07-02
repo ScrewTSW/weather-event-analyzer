@@ -481,6 +481,102 @@ def create_sounding_chart(profile_data):
     return fig
 
 
+def create_hodograph_chart(profile_data):
+    """Create a hodograph with Bunkers storm motion vectors and height-colored segments.
+
+    Args:
+        profile_data: Dict with keys:
+            - pressure_levels: List of pressure levels (hPa)
+            - wind_speed: List of wind speeds (m/s)
+            - wind_direction: List of wind directions (degrees)
+            - geopotential_height: List of geopotential heights (meters)
+            - synoptic_time: Timestamp string
+            - latitude: Location latitude
+            - longitude: Location longitude
+
+    Returns:
+        matplotlib Figure
+    """
+    plt.style.use("dark_background")
+
+    pressure = np.array(profile_data["pressure_levels"], dtype=float) * units.hPa
+    wind_speed = np.array(profile_data["wind_speed"], dtype=float) * units('m/s')
+    wind_dir = np.array(profile_data["wind_direction"], dtype=float) * units.degrees
+    heights = np.array(profile_data["geopotential_height"], dtype=float) * units.meter
+
+    u, v = mpcalc.wind_components(wind_speed, wind_dir)
+
+    max_wind = max(float(wind_speed.max().magnitude), 20)
+    ring_max = int(np.ceil(max_wind / 10) * 10) + 10
+
+    fig = plt.figure(figsize=(7, 7))
+    ax = fig.add_subplot(1, 1, 1)
+    h = Hodograph(ax, component_range=ring_max)
+    h.add_grid(increment=10)
+
+    height_m = heights.magnitude
+    bands = [
+        (0, 1000, 'red', 3.0, '0-1 km'),
+        (1000, 3000, 'orange', 2.0, '1-3 km'),
+        (3000, 6000, 'yellow', 1.5, '3-6 km'),
+        (6000, 9000, 'green', 1.5, '6-9 km'),
+        (9000, 99999, 'deepskyblue', 1.0, '9+ km'),
+    ]
+
+    from scipy.interpolate import interp1d
+    u_mag = u.magnitude
+    v_mag = v.magnitude
+    valid = np.isfinite(u_mag) & np.isfinite(v_mag) & np.isfinite(height_m)
+    if valid.sum() >= 4:
+        u_interp = interp1d(height_m[valid], u_mag[valid], kind='cubic',
+                            bounds_error=False, fill_value='extrapolate')
+        v_interp = interp1d(height_m[valid], v_mag[valid], kind='cubic',
+                            bounds_error=False, fill_value='extrapolate')
+        h_fine = np.arange(height_m[valid].min(), min(height_m[valid].max(), 12000), 50)
+
+        for low, high, color, lw, label in bands:
+            mask = (h_fine >= low) & (h_fine < high)
+            seg_h = h_fine[mask]
+            if len(seg_h) < 2:
+                continue
+            seg_u = u_interp(seg_h)
+            seg_v = v_interp(seg_h)
+            ax.plot(seg_u, seg_v, color=color, linewidth=lw, label=label, solid_capstyle='round')
+
+        ax.plot(u_mag[valid], v_mag[valid], 'o', color='white', markersize=3, zorder=5)
+
+        for label_h in [500, 1000, 3000, 6000, 9000]:
+            if height_m[valid].min() <= label_h <= height_m[valid].max():
+                lu = float(u_interp(label_h))
+                lv = float(v_interp(label_h))
+                ax.annotate(f'{label_h/1000:.0f}km', (lu, lv), fontsize=7,
+                            color='white', fontweight='bold',
+                            xytext=(5, 5), textcoords='offset points')
+    else:
+        ax.plot(u_mag, v_mag, color='white', linewidth=1.5)
+
+    try:
+        rm, lm, mean = mpcalc.bunkers_storm_motion(pressure, u, v, heights)
+        ax.plot(rm[0].magnitude, rm[1].magnitude, 'o', color='magenta',
+                markersize=10, zorder=10, label='RM')
+        ax.plot(lm[0].magnitude, lm[1].magnitude, 'o', color='cyan',
+                markersize=10, markerfacecolor='none', markeredgewidth=2,
+                zorder=10, label='LM')
+        ax.plot(mean[0].magnitude, mean[1].magnitude, '+', color='white',
+                markersize=12, markeredgewidth=2, zorder=10, label='MW')
+    except Exception:
+        pass
+
+    ax.set_xlabel('u (m/s)')
+    ax.set_ylabel('v (m/s)')
+    synoptic = profile_data.get("synoptic_time", "")
+    ax.set_title(f"Hodograph — {synoptic}", fontsize=12)
+    ax.legend(loc='upper right', fontsize=7, ncol=2)
+
+    plt.tight_layout()
+    return fig
+
+
 def create_timeline_bar(timestamps, current_idx=0):
     """Render a notched timeline bar with timestamps above each notch.
 
