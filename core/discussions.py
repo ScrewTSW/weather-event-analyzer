@@ -1,8 +1,19 @@
+import html
 import logging
 import re
 import time
 
 import requests
+
+
+def _clean_html(raw):
+    text = re.sub(r'<script[^>]*>.*?</script>', '', raw, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<style[^>]*>.*?</style>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<head[^>]*>.*?</head>', '', text, flags=re.DOTALL | re.IGNORECASE)
+    text = re.sub(r'<[^>]+>', '', text)
+    text = html.unescape(text)
+    text = re.sub(r'\n{3,}', '\n\n', text).strip()
+    return text
 
 from core.alerts import (
     is_us_location, is_europe_location, is_canada_location,
@@ -84,8 +95,11 @@ class MesoscaleDiscussionClient:
                 time.sleep(0.3)
                 md_resp = self.session.get(md_url, timeout=15)
                 if md_resp.status_code == 200:
-                    text = re.sub(r'<[^>]+>', '', md_resp.text).strip()
-                    text = re.sub(r'\n{3,}', '\n\n', text)
+                    pre_match = re.search(r'<pre>(.*?)</pre>', md_resp.text, re.DOTALL)
+                    if pre_match:
+                        text = html.unescape(pre_match.group(1)).strip()
+                    else:
+                        text = _clean_html(md_resp.text)
                     number = re.search(r'md(\d+)', link)
                     title = f"SPC Mesoscale Discussion #{number.group(1)}" if number else "SPC MD"
                     results.append({
@@ -121,8 +135,7 @@ class MesoscaleDiscussionClient:
             time.sleep(0.3)
             resp = self.session.get(url, timeout=15)
             if resp.status_code == 200:
-                text = re.sub(r'<[^>]+>', '', resp.text).strip()
-                text = re.sub(r'\n{3,}', '\n\n', text)
+                text = _clean_html(resp.text)
                 return [{
                     "source": "estofex", "region": "Europe",
                     "title": "ESTOFEX Convective Forecast",
