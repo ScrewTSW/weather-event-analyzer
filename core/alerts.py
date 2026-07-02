@@ -717,6 +717,34 @@ def is_europe_location(lat: float, lon: float) -> bool:
     return 35.0 <= lat <= 71.0 and -10.0 <= lon <= 40.0
 
 
+def is_canada_location(lat: float, lon: float) -> bool:
+    return 42.0 <= lat <= 83.0 and -141.0 <= lon <= -52.0
+
+
+def is_australia_location(lat: float, lon: float) -> bool:
+    return -44.0 <= lat <= -10.0 and 113.0 <= lon <= 154.0
+
+
+def is_japan_location(lat: float, lon: float) -> bool:
+    return 24.0 <= lat <= 46.0 and 122.0 <= lon <= 153.0
+
+
+def is_india_location(lat: float, lon: float) -> bool:
+    return 6.0 <= lat <= 36.0 and 68.0 <= lon <= 97.5
+
+
+def is_south_america_location(lat: float, lon: float) -> bool:
+    return -56.0 <= lat <= 13.0 and -82.0 <= lon <= -34.0
+
+
+def is_southeast_asia_location(lat: float, lon: float) -> bool:
+    return -11.0 <= lat <= 28.0 and 92.0 <= lon <= 141.0
+
+
+def is_southern_africa_location(lat: float, lon: float) -> bool:
+    return -35.0 <= lat <= 0.0 and 10.0 <= lon <= 41.0
+
+
 def detect_country(lat: float, lon: float) -> Optional[str]:
     """Detect European country from coordinates (simplified)."""
     # This is a simplified mapping - real implementation would use reverse geocoding
