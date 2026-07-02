@@ -258,7 +258,7 @@ def render_map_view(center_lat, center_lon, bbox_deg=20.0, date=None,
     return Image.open(buf).convert("RGBA")
 
 
-def add_geo_overlay(img, center_lat, center_lon, bbox_deg=20.0):
+def add_geo_overlay(img, center_lat, center_lon, bbox_deg=20.0, fronts=None):
     """Overlay coastlines, borders, and target marker on a pre-projected satellite image."""
     if not HAS_CARTOPY:
         return add_location_marker(img, img.width // 2, img.height // 2)
@@ -284,6 +284,37 @@ def add_geo_overlay(img, center_lat, center_lon, bbox_deg=20.0):
     ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5, zorder=5)
     ax.plot(center_lon, center_lat, '+', color='yellow', markersize=12,
             markeredgewidth=2, transform=map_crs, zorder=10)
+
+    if fronts:
+        for front in fronts:
+            f_lats = front["lats"]
+            f_lons = front["lons"]
+            if len(f_lats) < 2:
+                continue
+            if front["is_merger"]:
+                ax.plot(f_lons, f_lats, color='magenta', linewidth=4,
+                        transform=map_crs, zorder=8)
+                mid = len(f_lats) // 2
+                ax.plot(f_lons[mid], f_lats[mid], '*', color='magenta',
+                        markersize=15, transform=map_crs, zorder=9)
+                ax.text(f_lons[mid], f_lats[mid], f' {front["label"]}',
+                        color='magenta', fontsize=8, fontweight='bold',
+                        transform=map_crs, zorder=9)
+            elif front["type"] == "cold":
+                ax.plot(f_lons, f_lats, color='blue', linewidth=2.5,
+                        transform=map_crs, zorder=7)
+                for k in range(0, len(f_lats), max(1, len(f_lats) // 8)):
+                    ax.plot(f_lons[k], f_lats[k], '^', color='blue',
+                            markersize=6, transform=map_crs, zorder=8)
+            elif front["type"] == "warm":
+                ax.plot(f_lons, f_lats, color='red', linewidth=2.5,
+                        transform=map_crs, zorder=7)
+                for k in range(0, len(f_lats), max(1, len(f_lats) // 8)):
+                    ax.plot(f_lons[k], f_lats[k], 'o', color='red',
+                            markersize=5, transform=map_crs, zorder=8)
+            elif front["type"] == "dry":
+                ax.plot(f_lons, f_lats, color='orange', linewidth=2,
+                        linestyle='--', transform=map_crs, zorder=7)
 
     buf = io.BytesIO()
     fig.savefig(buf, format='png', dpi=dpi, pad_inches=0,
