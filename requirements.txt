@@ -3,6 +3,7 @@ Pillow>=9.0
 numpy>=1.23
 matplotlib>=3.6
 scipy>=1.10
+metpy>=1.5
 gradio>=4.0
 arm_pyart>=1.18
 nexradaws>=1.1
