@@ -282,6 +282,8 @@ def add_geo_overlay(img, center_lat, center_lon, bbox_deg=20.0, fronts=None):
 
     ax.coastlines(resolution='50m', color='cyan', linewidth=0.8, alpha=0.8, zorder=5)
     ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5, zorder=5)
+    ax.add_feature(cfeature.LAKES, facecolor='none', edgecolor='cyan', linewidth=0.5, alpha=0.6, zorder=5)
+    ax.add_feature(cfeature.STATES, linewidth=0.3, edgecolor='cyan', alpha=0.3, zorder=5)
     ax.plot(center_lon, center_lat, '+', color='yellow', markersize=12,
             markeredgewidth=2, transform=map_crs, zorder=10)
 
@@ -393,9 +395,42 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
     fig, ax1 = plt.subplots(figsize=(10, 6))
 
     if chart_type == "cape_cin":
-        # CAPE area fill (red) + CIN line (blue) with dual y-axis
-        cape_data = np.array(variables["cape"]["data"])
-        cin_data = np.array(variables["cin"]["data"])
+        if "cape" not in variables or "cin" not in variables:
+            # Compute CAPE/CIN from pressure-level profiles if available
+            if profile_hourly is not None and profile_hourly.get("timestamps"):
+                cape_vals = []
+                cin_vals = []
+                p_lvl = np.array(profile_hourly["pressure_levels"], dtype=float) * units.hPa
+                for t_idx in range(len(profile_hourly["timestamps"])):
+                    try:
+                        t_prof = np.array(profile_hourly["temperature"][t_idx], dtype=float) * units.degC
+                        td_prof = np.array(profile_hourly["dewpoint"][t_idx], dtype=float) * units.degC
+                        sb_cape, sb_cin = mpcalc.surface_based_cape_cin(p_lvl, t_prof, td_prof)
+                        cape_vals.append(float(sb_cape.magnitude))
+                        cin_vals.append(float(sb_cin.magnitude))
+                    except Exception:
+                        cape_vals.append(np.nan)
+                        cin_vals.append(np.nan)
+                cape_data = np.array(cape_vals)
+                cin_data = np.array(cin_vals)
+                time_objects = []
+                for ts in profile_hourly["timestamps"]:
+                    try:
+                        time_objects.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
+                    except Exception:
+                        time_objects.append(ts)
+                variables["cape"] = {"data": cape_vals, "unit": "J/kg"}
+                variables["cin"] = {"data": cin_vals, "unit": "J/kg"}
+            else:
+                ax1.text(0.5, 0.5, 'CAPE/CIN not available\n(archive data, no profile)',
+                         transform=ax1.transAxes, ha='center', va='center',
+                         fontsize=14, color='gray')
+                ax1.set_title('CAPE and CIN Evolution')
+                plt.tight_layout()
+                return fig
+        else:
+            cape_data = np.array(variables["cape"]["data"])
+            cin_data = np.array(variables["cin"]["data"])
 
         # Replace None with NaN
         cape_data = np.where(cape_data == None, np.nan, cape_data)
@@ -411,9 +446,9 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
 
         # Secondary axis: CIN
         ax2 = ax1.twinx()
-        ax2.plot(time_objects, cin_data, color='blue', linewidth=2, label='CIN')
-        ax2.set_ylabel(f'CIN ({variables["cin"]["unit"]})', color='blue')
-        ax2.tick_params(axis='y', labelcolor='blue')
+        ax2.plot(time_objects, cin_data, color='cyan', linewidth=2, label='CIN')
+        ax2.set_ylabel(f'CIN ({variables["cin"]["unit"]})', color='cyan')
+        ax2.tick_params(axis='y', labelcolor='cyan')
 
         if profile_hourly is not None:
             try:
@@ -485,7 +520,7 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
         wind_speed_data = np.where(wind_speed_data == None, np.nan, wind_speed_data)
         wind_gusts_data = np.where(wind_gusts_data == None, np.nan, wind_gusts_data)
 
-        ax1.plot(time_objects, wind_speed_data, color='blue', linewidth=2, label='Wind Speed')
+        ax1.plot(time_objects, wind_speed_data, color='cyan', linewidth=2, label='Wind Speed')
         ax1.plot(time_objects, wind_gusts_data, color='red', linewidth=2, linestyle='--', label='Wind Gusts')
         ax1.set_xlabel('Time')
         ax1.set_ylabel(f'Speed ({variables["wind_speed"]["unit"]})')
@@ -516,32 +551,164 @@ def create_sounding_chart(profile_data):
     """
     plt.style.use("dark_background")
 
-    pressure = np.array(profile_data["pressure_levels"], dtype=float) * units.hPa
-    temperature = np.array(profile_data["temperature"], dtype=float) * units.degC
-    dewpoint = np.array(profile_data["dewpoint"], dtype=float) * units.degC
-    wind_speed = np.array(profile_data["wind_speed"], dtype=float) * units('m/s')
-    wind_dir = np.array(profile_data["wind_direction"], dtype=float) * units.degrees
+    from scipy.interpolate import PchipInterpolator
+
+    p_raw = np.array(profile_data["pressure_levels"], dtype=float)
+    t_raw = np.array(profile_data["temperature"], dtype=float)
+    td_raw = np.array(profile_data["dewpoint"], dtype=float)
+    ws_raw = np.array(profile_data["wind_speed"], dtype=float)
+    wd_raw = np.array(profile_data["wind_direction"], dtype=float)
+
+    # Interpolate in log-pressure space; PCHIP preserves monotonicity
+    # and avoids overshooting artifacts in dewpoint dry layers
+    log_p = np.log(p_raw)
+    log_p_fine = np.linspace(log_p[0], log_p[-1], 200)
+    p_fine = np.exp(log_p_fine)
+
+    valid_t = np.isfinite(t_raw) & np.isfinite(td_raw)
+    if valid_t.sum() >= 4:
+        lp_v = log_p[valid_t]
+        t_v = t_raw[valid_t]
+        td_v = td_raw[valid_t]
+        # PCHIP needs strictly increasing x — reverse if decreasing
+        if lp_v[0] > lp_v[-1]:
+            lp_v = lp_v[::-1]
+            t_v = t_v[::-1]
+            td_v = td_v[::-1]
+        t_interp = PchipInterpolator(lp_v, t_v)
+        td_interp = PchipInterpolator(lp_v, td_v)
+        t_fine = t_interp(log_p_fine)
+        td_fine = td_interp(log_p_fine)
+    else:
+        p_fine = p_raw
+        t_fine = t_raw
+        td_fine = td_raw
+
+    pressure = p_raw * units.hPa
+    temperature = t_raw * units.degC
+    dewpoint = td_raw * units.degC
+    wind_speed = ws_raw * units('m/s')
+    wind_dir = wd_raw * units.degrees
+
+    p_smooth = p_fine * units.hPa
+    t_smooth = t_fine * units.degC
+    td_smooth = td_fine * units.degC
 
     u, v = mpcalc.wind_components(wind_speed, wind_dir)
 
-    fig = plt.figure(figsize=(9, 9))
+    fig = plt.figure(figsize=(9, 9), dpi=150)
     skew = SkewT(fig, rotation=45)
 
-    skew.plot(pressure, temperature, 'r', linewidth=2, label='Temperature')
-    skew.plot(pressure, dewpoint, 'g', linewidth=2, label='Dewpoint')
-    skew.plot_barbs(pressure, u, v)
+    skew.plot(p_smooth, t_smooth, 'r', linewidth=2, label='Temperature')
+    skew.plot(p_smooth, td_smooth, 'g', linewidth=2, label='Dewpoint')
+
+    u_kt = u.to('knots')
+    v_kt = v.to('knots')
+    skew.plot_barbs(pressure, u_kt, v_kt, xloc=0.95, length=7, linewidth=0.8)
 
     try:
         parcel_prof = mpcalc.parcel_profile(pressure, temperature[0], dewpoint[0]).to('degC')
-        skew.plot(pressure, parcel_prof, 'k', linewidth=1.5, linestyle='--', label='Parcel')
-        skew.shade_cape(pressure, temperature, parcel_prof, linewidth=0)
-        skew.shade_cin(pressure, temperature, parcel_prof, linewidth=0)
+        skew.plot(pressure, parcel_prof, color='yellow', linewidth=1.5, linestyle='--', label='Parcel')
+        skew.shade_cape(pressure, temperature, parcel_prof, facecolor='red', alpha=0.4, linewidth=0)
+        skew.shade_cin(pressure, temperature, parcel_prof, facecolor='deepskyblue', alpha=0.4, linewidth=0)
+    except Exception:
+        parcel_prof = None
+
+    # Use yaxis transform so labels always pin to the right edge
+    ytrans = skew.ax.get_yaxis_transform()
+
+    # LCL, LFC, EL markers
+    annotations = []
+    try:
+        lcl_p, lcl_t = mpcalc.lcl(pressure[0], temperature[0], dewpoint[0])
+        skew.ax.axhline(lcl_p.magnitude, color='lime', linewidth=1, linestyle='-', alpha=0.7)
+        skew.ax.text(1.02, lcl_p.magnitude,
+                     f'LCL {lcl_p.magnitude:.0f} hPa', color='lime', fontsize=8,
+                     va='center', ha='left', fontweight='bold',
+                     transform=ytrans, clip_on=False)
+    except Exception:
+        lcl_p = None
+
+    try:
+        if parcel_prof is not None:
+            lfc_p, lfc_t = mpcalc.lfc(pressure, temperature, dewpoint)
+            if not np.isnan(lfc_p.magnitude):
+                skew.ax.axhline(lfc_p.magnitude, color='orange', linewidth=1, linestyle='-', alpha=0.7)
+                skew.ax.text(1.02, lfc_p.magnitude,
+                             f'LFC {lfc_p.magnitude:.0f} hPa', color='orange', fontsize=8,
+                             va='center', ha='left', fontweight='bold',
+                             transform=ytrans, clip_on=False)
     except Exception:
         pass
 
-    skew.plot_dry_adiabats(alpha=0.2)
-    skew.plot_moist_adiabats(alpha=0.2)
-    skew.plot_mixing_lines(alpha=0.2)
+    try:
+        if parcel_prof is not None:
+            el_p, el_t = mpcalc.el(pressure, temperature, dewpoint)
+            if not np.isnan(el_p.magnitude):
+                skew.ax.axhline(el_p.magnitude, color='deepskyblue', linewidth=1, linestyle='-', alpha=0.7)
+                skew.ax.text(1.02, el_p.magnitude,
+                             f'EL {el_p.magnitude:.0f} hPa', color='deepskyblue', fontsize=8,
+                             va='center', ha='left', fontweight='bold',
+                             transform=ytrans, clip_on=False)
+    except Exception:
+        pass
+
+    # CAPE values: surface-based, mixed-layer, most-unstable
+    cape_lines = []
+    try:
+        sb_cape, sb_cin = mpcalc.surface_based_cape_cin(pressure, temperature, dewpoint)
+        cape_lines.append(f'SBCAPE: {sb_cape.magnitude:.0f} J/kg')
+        cape_lines.append(f'CIN: {sb_cin.magnitude:.0f} J/kg')
+    except Exception:
+        pass
+    try:
+        ml_cape, ml_cin = mpcalc.mixed_layer_cape_cin(pressure, temperature, dewpoint)
+        cape_lines.append(f'MLCAPE: {ml_cape.magnitude:.0f} J/kg')
+    except Exception:
+        pass
+    try:
+        mu_cape, mu_cin = mpcalc.most_unstable_cape_cin(pressure, temperature, dewpoint)
+        cape_lines.append(f'MUCAPE: {mu_cape.magnitude:.0f} J/kg')
+    except Exception:
+        pass
+
+    if cape_lines:
+        cape_text = '\n'.join(cape_lines)
+        skew.ax.text(0.02, 0.02, cape_text, transform=skew.ax.transAxes,
+                     fontsize=9, color='white', verticalalignment='bottom',
+                     fontfamily='monospace',
+                     bbox=dict(boxstyle='round,pad=0.4', facecolor='black', alpha=0.7))
+
+    # SFC label with I-beam and height
+    sfc_hgt = profile_data["geopotential_height"][0] if profile_data.get("geopotential_height") else 0
+    sfc_p = pressure[0].magnitude
+    skew.ax.axhline(sfc_p, color='white', linewidth=1.5, linestyle='-', alpha=0.5)
+    skew.ax.text(1.02, sfc_p,
+                 f'SFC {sfc_hgt:.0f}m', color='white', fontsize=8,
+                 va='center', ha='left', fontweight='bold',
+                 transform=ytrans, clip_on=False)
+
+    skew.plot_dry_adiabats(alpha=0.8, linewidth=0.8, colors='#CC6644')
+    skew.plot_moist_adiabats(alpha=0.7, linewidth=0.8, colors='#44AA66')
+    skew.plot_mixing_lines(alpha=0.85, linewidth=1.2, linestyle='--', colors='#008080')
+
+    # Label mixing ratio values (g/kg) at bottom of each line
+    mixing_ratios = [1, 2, 4, 7, 10, 16, 24, 32]
+    bottom_p = 1050 * units.hPa
+    for mr in mixing_ratios:
+        try:
+            td = mpcalc.dewpoint(mpcalc.vapor_pressure(
+                bottom_p, mr / 1000.0)).to('degC').magnitude
+            if -40 <= td <= 50:
+                skew.ax.text(td, 1080, f'{mr}', color='#008080', fontsize=6,
+                             ha='center', va='top', fontweight='bold',
+                             clip_on=False)
+        except Exception:
+            pass
+
+    # Highlight the 0°C and -20°C isotherms (diagonal lines on Skew-T)
+    skew.ax.axvline(0, color='#00FFFF', linewidth=2, linestyle=':', alpha=0.8, zorder=5)
+    skew.ax.axvline(-20, color='#AA00FF', linewidth=2, linestyle=':', alpha=0.8, zorder=5)
 
     skew.ax.set_ylim(1050, 100)
     skew.ax.set_xlim(-40, 50)
@@ -580,18 +747,22 @@ def create_hodograph_chart(profile_data):
     heights = np.array(profile_data["geopotential_height"], dtype=float) * units.meter
 
     u, v = mpcalc.wind_components(wind_speed, wind_dir)
+    MS_TO_KT = 1.94384
+    u_kt = u.magnitude * MS_TO_KT
+    v_kt = v.magnitude * MS_TO_KT
 
-    max_wind = max(float(wind_speed.max().magnitude), 20)
-    ring_max = int(np.ceil(max_wind / 10) * 10) + 10
+    max_wind_kt = max(float(wind_speed.max().magnitude) * MS_TO_KT, 40)
+    ring_max = int(np.ceil(max_wind_kt / 20) * 20) + 20
 
-    fig = plt.figure(figsize=(7, 7))
-    ax = fig.add_subplot(1, 1, 1)
+    fig = plt.figure(figsize=(9, 7), dpi=150)
+    ax = fig.add_axes([0.08, 0.08, 0.68, 0.84])
     h = Hodograph(ax, component_range=ring_max)
-    h.add_grid(increment=10)
+    h.add_grid(increment=20)
 
     height_m = heights.magnitude
     bands = [
-        (0, 1000, 'red', 3.0, '0-1 km'),
+        (0, 500, '#AA00FF', 3.5, '0-0.5 km'),
+        (500, 1000, 'red', 3.0, '0.5-1 km'),
         (1000, 3000, 'orange', 2.0, '1-3 km'),
         (3000, 6000, 'yellow', 1.5, '3-6 km'),
         (6000, 9000, 'green', 1.5, '6-9 km'),
@@ -599,8 +770,8 @@ def create_hodograph_chart(profile_data):
     ]
 
     from scipy.interpolate import interp1d
-    u_mag = u.magnitude
-    v_mag = v.magnitude
+    u_mag = u_kt
+    v_mag = v_kt
     valid = np.isfinite(u_mag) & np.isfinite(v_mag) & np.isfinite(height_m)
     if valid.sum() >= 4:
         u_interp = interp1d(height_m[valid], u_mag[valid], kind='cubic',
@@ -618,8 +789,6 @@ def create_hodograph_chart(profile_data):
             seg_v = v_interp(seg_h)
             ax.plot(seg_u, seg_v, color=color, linewidth=lw, label=label, solid_capstyle='round')
 
-        ax.plot(u_mag[valid], v_mag[valid], 'o', color='white', markersize=3, zorder=5)
-
         for label_h in [500, 1000, 3000, 6000, 9000]:
             if height_m[valid].min() <= label_h <= height_m[valid].max():
                 lu = float(u_interp(label_h))
@@ -632,23 +801,74 @@ def create_hodograph_chart(profile_data):
 
     try:
         rm, lm, mean = mpcalc.bunkers_storm_motion(pressure, u, v, heights)
-        ax.plot(rm[0].magnitude, rm[1].magnitude, 'o', color='magenta',
-                markersize=10, zorder=10, label='RM')
-        ax.plot(lm[0].magnitude, lm[1].magnitude, 'o', color='cyan',
-                markersize=10, markerfacecolor='none', markeredgewidth=2,
-                zorder=10, label='LM')
-        ax.plot(mean[0].magnitude, mean[1].magnitude, '+', color='white',
-                markersize=12, markeredgewidth=2, zorder=10, label='MW')
+        ax.plot(rm[0].magnitude * MS_TO_KT, rm[1].magnitude * MS_TO_KT, 'o',
+                color='magenta', markersize=10, zorder=10, label='RM')
+        ax.plot(lm[0].magnitude * MS_TO_KT, lm[1].magnitude * MS_TO_KT, 'o',
+                color='cyan', markersize=10, markerfacecolor='none',
+                markeredgewidth=2, zorder=10, label='LM')
+        ax.plot(mean[0].magnitude * MS_TO_KT, mean[1].magnitude * MS_TO_KT, '+',
+                color='white', markersize=12, markeredgewidth=2, zorder=10, label='MW')
     except Exception:
         pass
 
-    ax.set_xlabel('u (m/s)')
-    ax.set_ylabel('v (m/s)')
+    ax.set_xlabel('u (kt)')
+    ax.set_ylabel('v (kt)')
     synoptic = profile_data.get("synoptic_time", "")
     ax.set_title(f"Hodograph — {synoptic}", fontsize=12)
-    ax.legend(loc='upper right', fontsize=7, ncol=2)
+    ax.legend(loc='upper right', fontsize=6, ncol=2)
 
-    plt.tight_layout()
+    # Wind barb column on the right — interpolated for density
+    ax_barbs = fig.add_axes([0.77, 0.08, 0.10, 0.84])
+    u_kt_arr = u.to('knots').magnitude
+    v_kt_arr = v.to('knots').magnitude
+    p_arr = pressure.magnitude
+    log_p_arr = np.log(p_arr)
+
+    if valid.sum() >= 4:
+        log_p_fine_b = np.linspace(log_p_arr[0], log_p_arr[-1], len(p_arr) * 2)
+        # Ensure raw data points are included so surface isn't lost to interpolation
+        log_p_fine_b = np.unique(np.sort(np.concatenate([log_p_fine_b, log_p_arr])))
+        p_fine_b = np.exp(log_p_fine_b)
+        u_interp_b = interp1d(log_p_arr[valid], u_kt_arr[valid], kind='cubic',
+                               bounds_error=False, fill_value='extrapolate')
+        v_interp_b = interp1d(log_p_arr[valid], v_kt_arr[valid], kind='cubic',
+                               bounds_error=False, fill_value='extrapolate')
+        h_interp_b = interp1d(log_p_arr[valid], height_m[valid], kind='linear',
+                               bounds_error=False, fill_value='extrapolate')
+        u_fine_b = u_interp_b(log_p_fine_b)
+        v_fine_b = v_interp_b(log_p_fine_b)
+        h_fine_b = h_interp_b(log_p_fine_b)
+    else:
+        p_fine_b = p_arr
+        u_fine_b = u_kt_arr
+        v_fine_b = v_kt_arr
+        h_fine_b = height_m
+
+    for i in range(len(p_fine_b)):
+        hgt = h_fine_b[i]
+        barb_color = 'white'
+        for low, high, color, _, _ in bands:
+            if low <= hgt < high:
+                barb_color = color
+                break
+        ax_barbs.barbs(0, p_fine_b[i], u_fine_b[i], v_fine_b[i],
+                       color=barb_color, length=6, linewidth=0.7)
+    ax_barbs.set_yscale('log')
+    ax_barbs.set_ylim(1050, 100)
+    ax_barbs.set_xlim(-1, 1)
+    ax_barbs.set_xticks([])
+    ax_barbs.set_ylabel('hPa', fontsize=8)
+    ax_barbs.yaxis.set_label_position('right')
+    ax_barbs.yaxis.tick_right()
+    import matplotlib.ticker as mticker
+    ax_barbs.yaxis.set_major_formatter(mticker.ScalarFormatter())
+    ax_barbs.yaxis.set_minor_formatter(mticker.NullFormatter())
+    ax_barbs.set_yticks([1000, 925, 850, 700, 500, 300, 200, 100])
+    ax_barbs.set_yticklabels(['1000', '925', '850', '700', '500', '300', '200', '100'],
+                              fontsize=6)
+    ax_barbs.set_facecolor('black')
+    ax_barbs.set_title('Wind', fontsize=9)
+
     return fig
 
 
