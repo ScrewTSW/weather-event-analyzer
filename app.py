@@ -12,6 +12,10 @@ from core.satellite import SatelliteClient, SOURCES
 from core.atmosphere import OpenMeteoClient
 from core.alerts import fetch_alerts
 from core.visualize import create_atmosphere_chart, add_timestamp_label, add_geo_overlay
+from core.pressure_levels import PressureLevelClient, snap_to_synoptic
+from core.visualize import create_sounding_chart, create_hodograph_chart
+from core.discussions import MesoscaleDiscussionClient
+from core.fronts import FrontalAnalyzer
 
 
 TIMELINE_HTML_TEMPLATE = """
@@ -95,13 +99,16 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
     cache = Cache(str(cache_dir), max_size_gb=cache_max_gb)
     sat_client = SatelliteClient(cache)
     atmo_client = OpenMeteoClient()
+    pressure_client = PressureLevelClient()
+    discussion_client = MesoscaleDiscussionClient()
+    frontal_analyzer = FrontalAnalyzer()
 
     state = {"composed_frames": [], "frame_labels": []}
 
-    def fetch_data(location_str, date, start_utc, end_utc, zoom, product):
+    def fetch_data(location_str, date, start_utc, end_utc, zoom, product, show_fronts):
         log_lines = []
-        # outputs: image, timeline_html, cape, temp, wind, info, log, alerts
-        empty = (None, "", None, None, None, "", "", [])
+        # outputs: image, timeline_html, cape, temp, wind, info, log, alerts, sounding, hodo, discussion, synoptic_label
+        empty = (None, "", None, None, None, "", "", [], None, None, "", "")
 
         def log(msg):
             log_lines.append(msg)
@@ -109,7 +116,9 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
         def out(**kw):
             base = list(empty)
             base[6] = "\n".join(log_lines)
-            mapping = {"image": 0, "timeline": 1, "cape": 2, "temp": 3, "wind": 4, "info": 5, "alerts": 7}
+            mapping = {"image": 0, "timeline": 1, "cape": 2, "temp": 3, "wind": 4,
+                       "info": 5, "alerts": 7, "sounding": 8, "hodo": 9,
+                       "discussion": 10, "synoptic_label": 11}
             for k, v in kw.items():
                 base[mapping[k]] = v
             return tuple(base)
@@ -158,7 +167,68 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             alerts_data = _format_alerts(alerts_raw)
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
 
-            # 3. Satellite imagery (pre-projected tiles from GIBS/EUMETSAT)
+            # 3. Pressure-level data (sounding, hodograph, helicity)
+            log("Fetching pressure-level data...")
+            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
+            sc_h = int(start_utc.replace(":", "")[:2]) if start_utc else 12
+            synoptic_h = snap_to_synoptic(sc_h)
+            synoptic_label = f"Synoptic time: {synoptic_h:02d}Z {date}"
+
+            try:
+                profile = pressure_client.fetch_snapshot(lat, lon, date, sc_h)
+                sounding = create_sounding_chart(profile)
+                hodo = create_hodograph_chart(profile)
+                log(f"Sounding/Hodograph: {profile['source']} ({synoptic_h:02d}Z)")
+            except Exception as e:
+                log(f"Sounding/Hodograph failed: {e}")
+                sounding, hodo = None, None
+
+            try:
+                profile_hourly = pressure_client.fetch_hourly(lat, lon, date)
+                cape = create_atmosphere_chart(atmo, "cape_cin", profile_hourly=profile_hourly)
+                log("Helicity added to CAPE/CIN chart")
+            except Exception as e:
+                log(f"Helicity computation failed: {e}")
+
+            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
+                      sounding=sounding, hodo=hodo, synoptic_label=synoptic_label)
+
+            # 4. Mesoscale discussions
+            log("Fetching mesoscale discussions...")
+            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
+                      sounding=sounding, hodo=hodo, synoptic_label=synoptic_label)
+            try:
+                discussions = discussion_client.fetch(lat, lon, date)
+                disc_text = ""
+                for d in discussions:
+                    disc_text += f"### {d['title']} ({d['source']})\n\n{d['text']}\n\n---\n\n"
+                if not disc_text:
+                    disc_text = "No mesoscale discussions available for this region."
+                log(f"Found {len(discussions)} discussion(s)")
+            except Exception as e:
+                log(f"Discussions failed: {e}")
+                disc_text = "Failed to fetch mesoscale discussions."
+
+            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
+                      sounding=sounding, hodo=hodo, discussion=disc_text,
+                      synoptic_label=synoptic_label)
+
+            # 5. Frontal analysis (optional)
+            detected_fronts = None
+            if show_fronts:
+                log("Running frontal analysis...")
+                yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
+                          sounding=sounding, hodo=hodo, discussion=disc_text,
+                          synoptic_label=synoptic_label)
+                try:
+                    detected_fronts = frontal_analyzer.fetch_and_analyze(
+                        lat, lon, date, run_hour=f"{synoptic_h:02d}")
+                    n_fronts = len(detected_fronts)
+                    log(f"Detected {n_fronts} frontal feature(s)")
+                except Exception as e:
+                    log(f"Frontal analysis failed: {e}")
+
+            # 6. Satellite imagery (pre-projected tiles from GIBS/EUMETSAT)
             # Zoom: 0=40°(continental), 1=30°, 2=20°, 3=10°, 4=5°(city)
             bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
             date_c = date.replace("-", "")
@@ -176,20 +246,25 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             for i, f in enumerate(frames):
                 ts = f["timestamp"]
                 label = ts.replace("T", " ").replace("Z", " UTC")
-                img = add_geo_overlay(f["image"], lat, lon, bbox_deg=bbox_deg)
+                img = add_geo_overlay(f["image"], lat, lon, bbox_deg=bbox_deg,
+                                      fronts=detected_fronts)
                 img = add_timestamp_label(img, label, f["source"], display)
                 composed.append(img)
                 labels.append(label)
                 if i == 0:
                     yield out(image=img, timeline=gr.HTML(value=0, labels_json=json.dumps(labels), frame_count=len(labels)),
-                              info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
+                              info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
+                              sounding=sounding, hodo=hodo, discussion=disc_text,
+                              synoptic_label=synoptic_label)
 
             state["composed_frames"] = composed
             state["frame_labels"] = labels
             log("Done.")
             yield out(image=composed[0] if composed else None,
                       timeline=gr.HTML(value=0, labels_json=json.dumps(labels), frame_count=len(labels)),
-                      info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
+                      info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
+                      sounding=sounding, hodo=hodo, discussion=disc_text,
+                      synoptic_label=synoptic_label)
 
         except Exception as e:
             import traceback
@@ -206,8 +281,8 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
         frames = state["composed_frames"]
         labels = state["frame_labels"]
         if not frames or idx >= len(frames):
-            return None, gr.skip()
-        return frames[idx], gr.HTML(value=idx, labels_json=json.dumps(labels), frame_count=len(labels))
+            return (None, gr.skip()) + tuple(gr.skip() for _ in range(10))
+        return (frames[idx], gr.HTML(value=idx, labels_json=json.dumps(labels), frame_count=len(labels))) + tuple(gr.skip() for _ in range(10))
 
     with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
@@ -226,6 +301,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                     value="auto",
                     label="Satellite Source",
                 )
+                fronts_checkbox = gr.Checkbox(label="Show Frontal Analysis", value=False)
                 resolved = gr.Textbox(label="Resolved", interactive=False)
                 fetch_btn = gr.Button("Fetch Data", variant="primary")
 
@@ -240,10 +316,19 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                     js_on_load=TIMELINE_JS,
                 )
 
+        gr.Markdown("### Time Series")
         with gr.Row():
-            cape_plot = gr.Plot(label="CAPE / CIN")
+            cape_plot = gr.Plot(label="CAPE / CIN / Helicity")
             temp_plot = gr.Plot(label="Temperature / Dewpoint")
             wind_plot = gr.Plot(label="Wind Speed")
+
+        gr.Markdown("### Vertical Profile & Analysis")
+        with gr.Row():
+            sounding_plot = gr.Plot(label="Skew-T Sounding")
+            hodo_plot = gr.Plot(label="Hodograph")
+            with gr.Column():
+                synoptic_label = gr.Textbox(label="Synoptic Time", interactive=False, lines=1)
+                discussion_box = gr.Markdown(label="Mesoscale Discussion", value="")
 
         alerts_table = gr.Dataframe(
             headers=["Severity", "Event", "Title", "Intensity", "GPS", "Source", "From", "To"],
@@ -253,15 +338,19 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
         fetch_btn.click(
             fn=fetch_data,
-            inputs=[location_input, date_input, start_input, end_input, zoom_slider, product_dd],
+            inputs=[location_input, date_input, start_input, end_input,
+                    zoom_slider, product_dd, fronts_checkbox],
             outputs=[sat_image, timeline, cape_plot, temp_plot, wind_plot,
-                     resolved, status_log, alerts_table],
+                     resolved, status_log, alerts_table,
+                     sounding_plot, hodo_plot, discussion_box, synoptic_label],
             show_progress="hidden",
         )
         timeline.change(
             fn=on_frame_change,
             inputs=[timeline],
-            outputs=[sat_image, timeline],
+            outputs=[sat_image, timeline, cape_plot, temp_plot, wind_plot,
+                     resolved, status_log, alerts_table,
+                     sounding_plot, hodo_plot, discussion_box, synoptic_label],
             show_progress="hidden",
         )
 
