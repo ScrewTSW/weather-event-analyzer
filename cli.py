@@ -8,6 +8,8 @@ from core.location import resolve_location
 from core.satellite import SatelliteClient
 from core.atmosphere import OpenMeteoClient
 from core.visualize import compose_frame, create_atmosphere_chart, create_timelapse_gif, create_timelapse_mp4
+from core.pressure_levels import PressureLevelClient, snap_to_synoptic
+from core.visualize import create_sounding_chart, create_hodograph_chart
 
 
 def add_subparsers(subparsers):
@@ -145,6 +147,21 @@ def _run_atmosphere(args, cache):
             print(f"  Saved: {path}")
         except Exception as e:
             print(f"  Skipped {chart_type}: {e}")
+
+    # Pressure-level charts
+    pressure_client = PressureLevelClient()
+    try:
+        profile = pressure_client.fetch_snapshot(lat, lon, args.date, 12)
+        for name, fn in [("sounding", create_sounding_chart), ("hodograph", create_hodograph_chart)]:
+            try:
+                fig = fn(profile)
+                path = output_dir / f"chart_{name}.png"
+                fig.savefig(path, dpi=150, bbox_inches="tight")
+                print(f"  Saved: {path}")
+            except Exception as e:
+                print(f"  Skipped {name}: {e}")
+    except Exception as e:
+        print(f"  Pressure-level data failed: {e}")
 
     print(f"Done. Charts saved to {output_dir}")
 
