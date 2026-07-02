@@ -87,6 +87,34 @@ class TestAtmosphereChart:
         fig = create_atmosphere_chart(data, chart_type="wind")
         assert fig is not None
 
+    def test_cape_cin_with_helicity(self):
+        data = {
+            "timestamps": ["2026-07-02T07:00", "2026-07-02T08:00", "2026-07-02T09:00"],
+            "variables": {
+                "cape": {"data": [500, 1200, 1800], "unit": "J/kg"},
+                "cin": {"data": [20, 15, 5], "unit": "J/kg"},
+            },
+        }
+        levels = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500,
+                  400, 300, 250, 200, 150, 100, 70, 50, 30]
+        n = len(levels)
+        profile_hourly = {
+            "source": "open-meteo-pressure",
+            "pressure_levels": levels,
+            "timestamps": ["2026-07-02T07:00", "2026-07-02T08:00", "2026-07-02T09:00"],
+            "wind_speed": [[5 + j for j in range(n)] for _ in range(3)],
+            "wind_direction": [[180 + j * 10 for j in range(n)] for _ in range(3)],
+            "geopotential_height": [[100, 320, 500, 800, 1000, 1500, 1900,
+                                     3000, 4200, 5600, 7200, 9200, 10400,
+                                     11800, 13500, 15800, 17700, 19300, 22000]] * 3,
+            "temperature": [[20 - j for j in range(n)] for _ in range(3)],
+            "dewpoint": [[15 - j for j in range(n)] for _ in range(3)],
+        }
+        fig = create_atmosphere_chart(data, "cape_cin", profile_hourly=profile_hourly)
+        assert fig is not None
+        axes = fig.axes
+        assert len(axes) >= 3, "Expected at least 3 axes (CAPE, CIN, SRH)"
+
 
 class TestTimelapse:
     def test_creates_gif(self, tmp_path):

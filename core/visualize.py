@@ -328,7 +328,7 @@ def compose_frame(satellite_image, timestamp, satellite_name, location_str,
     return frame
 
 
-def create_atmosphere_chart(data, chart_type):
+def create_atmosphere_chart(data, chart_type, profile_hourly=None):
     """Create atmospheric data charts.
 
     Args:
@@ -341,6 +341,9 @@ def create_atmosphere_chart(data, chart_type):
                 }
             }
         chart_type: One of "cape_cin", "temp_dewpoint", "wind"
+        profile_hourly: Optional dict with keys pressure_levels, timestamps,
+                       wind_speed, wind_direction, geopotential_height
+                       for adding SRH helicity lines to cape_cin chart
 
     Returns:
         matplotlib Figure
@@ -380,6 +383,47 @@ def create_atmosphere_chart(data, chart_type):
         ax2.plot(time_objects, cin_data, color='blue', linewidth=2, label='CIN')
         ax2.set_ylabel(f'CIN ({variables["cin"]["unit"]})', color='blue')
         ax2.tick_params(axis='y', labelcolor='blue')
+
+        if profile_hourly is not None:
+            try:
+                srh_3km = []
+                srh_1km = []
+                p_levels = np.array(profile_hourly["pressure_levels"], dtype=float) * units.hPa
+                for t_idx in range(len(profile_hourly["timestamps"])):
+                    ws = np.array(profile_hourly["wind_speed"][t_idx], dtype=float) * units('m/s')
+                    wd = np.array(profile_hourly["wind_direction"][t_idx], dtype=float) * units.degrees
+                    ht = np.array(profile_hourly["geopotential_height"][t_idx], dtype=float) * units.meter
+                    u_t, v_t = mpcalc.wind_components(ws, wd)
+                    try:
+                        pos3, neg3, total3 = mpcalc.storm_relative_helicity(
+                            ht, u_t, v_t, depth=3000 * units.meter)
+                        srh_3km.append(float(total3.magnitude))
+                    except Exception:
+                        srh_3km.append(np.nan)
+                    try:
+                        pos1, neg1, total1 = mpcalc.storm_relative_helicity(
+                            ht, u_t, v_t, depth=1000 * units.meter)
+                        srh_1km.append(float(total1.magnitude))
+                    except Exception:
+                        srh_1km.append(np.nan)
+
+                srh_times = []
+                for ts in profile_hourly["timestamps"]:
+                    try:
+                        srh_times.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
+                    except Exception:
+                        srh_times.append(ts)
+
+                ax3 = ax1.twinx()
+                ax3.spines['right'].set_position(('axes', 1.15))
+                ax3.plot(srh_times, srh_3km, color='magenta', linewidth=2,
+                         label='SRH 0-3km', solid_capstyle='round')
+                ax3.plot(srh_times, srh_1km, color='magenta', linewidth=2,
+                         linestyle='--', label='SRH 0-1km')
+                ax3.set_ylabel('SRH (m²/s²)', color='magenta')
+                ax3.tick_params(axis='y', labelcolor='magenta')
+            except Exception:
+                pass
 
         plt.title('CAPE and CIN Evolution')
 
