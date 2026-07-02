@@ -2,9 +2,12 @@
 import json
 from pathlib import Path
 
+import io
+
 import gradio as gr
 import matplotlib
 matplotlib.use("Agg")
+from PIL import Image
 
 from core.cache import Cache, default_cache_dir
 from core.location import resolve_location
@@ -147,14 +150,23 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             log(f"Satellite: {satellite['name']}")
             yield out(info=info)
 
+            def _fig_to_pil(fig):
+                buf = io.BytesIO()
+                fig.savefig(buf, format='png', bbox_inches='tight',
+                            facecolor=fig.get_facecolor(), edgecolor='none')
+                import matplotlib.pyplot as plt
+                plt.close(fig)
+                buf.seek(0)
+                return Image.open(buf).convert("RGB")
+
             # 1. Atmosphere (fast)
             log("Fetching atmosphere...")
             yield out(info=info)
             atmo = atmo_client.fetch(lat, lon, date)
             log(f"Atmosphere: {atmo['source']} ({len(atmo['timestamps'])}h)")
-            cape = create_atmosphere_chart(atmo, "cape_cin")
-            temp = create_atmosphere_chart(atmo, "temp_dewpoint")
-            wind = create_atmosphere_chart(atmo, "wind")
+            cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin"))
+            temp = _fig_to_pil(create_atmosphere_chart(atmo, "temp_dewpoint"))
+            wind = _fig_to_pil(create_atmosphere_chart(atmo, "wind"))
             yield out(info=info, cape=cape, temp=temp, wind=wind)
 
             # 2. Alerts (fast)
@@ -176,8 +188,8 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
             try:
                 profile = pressure_client.fetch_snapshot(lat, lon, date, sc_h)
-                sounding = create_sounding_chart(profile)
-                hodo = create_hodograph_chart(profile)
+                sounding = _fig_to_pil(create_sounding_chart(profile))
+                hodo = _fig_to_pil(create_hodograph_chart(profile))
                 log(f"Sounding/Hodograph: {profile['source']} ({synoptic_h:02d}Z)")
             except Exception as e:
                 log(f"Sounding/Hodograph failed: {e}")
@@ -185,8 +197,9 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
             try:
                 profile_hourly = pressure_client.fetch_hourly(lat, lon, date)
-                cape = create_atmosphere_chart(atmo, "cape_cin", profile_hourly=profile_hourly)
-                log("Helicity added to CAPE/CIN chart")
+                cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin", profile_hourly=profile_hourly))
+                has_cape = "cape" in atmo.get("variables", {})
+                log("Helicity added to CAPE/CIN chart" + ("" if has_cape else " (CAPE computed from profiles)"))
             except Exception as e:
                 log(f"Helicity computation failed: {e}")
 
@@ -214,6 +227,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                       synoptic_label=synoptic_label)
 
             # 5. Frontal analysis (optional)
+            bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
             detected_fronts = None
             if show_fronts:
                 log("Running frontal analysis...")
@@ -222,18 +236,19 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                           synoptic_label=synoptic_label)
                 try:
                     detected_fronts = frontal_analyzer.fetch_and_analyze(
-                        lat, lon, date, run_hour=f"{synoptic_h:02d}")
+                        lat, lon, date, run_hour=f"{synoptic_h:02d}",
+                        bbox_deg=bbox_deg)
                     n_fronts = len(detected_fronts)
                     log(f"Detected {n_fronts} frontal feature(s)")
                 except Exception as e:
                     log(f"Frontal analysis failed: {e}")
 
             # 6. Satellite imagery (pre-projected tiles from GIBS/EUMETSAT)
-            # Zoom: 0=40°(continental), 1=30°, 2=20°, 3=10°, 4=5°(city)
-            bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
             date_c = date.replace("-", "")
             log(f"Fetching satellite imagery (bbox={bbox_deg}°)...")
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
+            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
+                      sounding=sounding, hodo=hodo, discussion=disc_text,
+                      synoptic_label=synoptic_label)
 
             frames = sat_client.fetch_event(
                 lat=lat, lon=lon, date=date_c, start_utc=sc, end_utc=ec,
@@ -284,8 +299,82 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             return (None, gr.skip()) + tuple(gr.skip() for _ in range(10))
         return (frames[idx], gr.HTML(value=idx, labels_json=json.dumps(labels), frame_count=len(labels))) + tuple(gr.skip() for _ in range(10))
 
+    TOOLTIP_CSS = """
+    <style>
+    .wea-tip { position:relative; display:inline-block; cursor:pointer;
+               background:#2196F3; color:white; border-radius:50%;
+               width:18px; height:18px; text-align:center; font-size:12px;
+               line-height:18px; margin-left:8px; vertical-align:middle;
+               font-style:italic; font-weight:bold; }
+    .wea-tip .wea-tt { visibility:hidden; background:#1a1a2e; color:#ddd;
+               border:1px solid #444; border-radius:8px; padding:12px 14px;
+               position:absolute; bottom:130%; left:50%; transform:translateX(-50%);
+               width:380px; font-size:13px; line-height:1.5; z-index:999;
+               box-shadow:0 4px 16px rgba(0,0,0,0.5); font-style:normal;
+               font-weight:normal; pointer-events:none; }
+    .wea-tip:hover .wea-tt { visibility:visible; }
+    .wea-tip .wea-tt::after { content:""; position:absolute; top:100%; left:50%;
+               margin-left:-6px; border-width:6px; border-style:solid;
+               border-color:#1a1a2e transparent transparent transparent; }
+    </style>
+    """
+
+    def tip(text):
+        safe = text.replace('"', '&quot;').replace("'", "&#39;")
+        return f'<span class="wea-tip">i<span class="wea-tt">{safe}</span></span>'
+
+    TIP_SAT = tip(
+        "Satellite imagery from GOES, Meteosat, or Himawari. Look for: "
+        "rapidly expanding cloud tops (overshooting tops), V-shaped anvils, "
+        "back-building cells, and dark shadows indicating tall storms. "
+        "Frontal boundaries may be overlaid when enabled."
+    )
+    TIP_CAPE = tip(
+        "CAPE (red fill) = energy available for thunderstorm updrafts. "
+        "Values >1000 J/kg suggest strong storms, >2500 J/kg severe potential. "
+        "CIN (cyan) = cap strength; high CIN suppresses initiation until a trigger breaks it. "
+        "Helicity (magenta) = SRH 0-3km (solid) and 0-1km (dashed); "
+        "values >150 m²/s² favor supercells, >300 favor tornadoes."
+    )
+    TIP_TEMP = tip(
+        "Temperature (red) and dewpoint (green) at 2m height over time. "
+        "A narrowing spread (T-Td < 3°C) means high moisture. "
+        "Watch for rapid dewpoint rises (moisture advection) or sharp temperature drops (outflow boundaries)."
+    )
+    TIP_WIND = tip(
+        "Surface wind speed (cyan) and gusts (red dashed). "
+        "Sudden wind shifts or gust spikes can indicate outflow boundaries or frontal passages. "
+        "Sustained winds >15 m/s with gusts >25 m/s suggest damaging wind potential."
+    )
+    TIP_SKEWT = tip(
+        "Skew-T Log-P sounding: temperature (red), dewpoint (green), parcel path (yellow dashed). "
+        "Red shading = CAPE (positive buoyancy), blue = CIN (cap). "
+        "LCL = cloud base, LFC = free convection level, EL = equilibrium level. "
+        "Steep lapse rates (temp line tilting far left) and high moisture (green close to red) "
+        "indicate strong instability. Wind barbs show speed/direction at each level."
+    )
+    TIP_HODO = tip(
+        "Hodograph shows wind shear profile. Each color = altitude band. "
+        "Long, curved traces indicate strong shear favoring supercells. "
+        "Clockwise turning (veering) in 0-3km supports right-moving supercells. "
+        "RM/LM = Bunkers right/left mover storm motion. "
+        "Large area between 0-1km curve and storm motion = high SRH = tornado potential."
+    )
+    TIP_DISC = tip(
+        "Mesoscale discussions from regional weather services (SPC, ESTOFEX, BOM, etc.). "
+        "These are expert text analyses of current severe weather potential, "
+        "describing expected storm modes, timing, and primary hazards."
+    )
+    TIP_ALERTS = tip(
+        "Active severe weather alerts from global sources. "
+        "EXTREME = life-threatening (tornadoes, major hurricanes). "
+        "SEVERE = significant damage potential. "
+        "Check event type and timing to assess immediate risk."
+    )
+
     with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
+        gr.HTML(TOOLTIP_CSS)
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -301,12 +390,14 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                     value="auto",
                     label="Satellite Source",
                 )
-                fronts_checkbox = gr.Checkbox(label="Show Frontal Analysis", value=False)
+                fronts_checkbox = gr.Checkbox(label="Show Frontal Analysis (experimental)", value=False)
                 resolved = gr.Textbox(label="Resolved", interactive=False)
                 fetch_btn = gr.Button("Fetch Data", variant="primary")
 
             with gr.Column(scale=2):
-                sat_image = gr.Image(label="Satellite Imagery", type="pil", height=520)
+                gr.HTML(f'<div style="margin-bottom:4px"><b>Satellite Imagery</b> {TIP_SAT}</div>')
+                sat_image = gr.Image(label="Satellite Imagery", type="pil", height=520,
+                                     show_label=False)
                 timeline = gr.HTML(
                     value=0,
                     frame_count=0,
@@ -316,23 +407,40 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                     js_on_load=TIMELINE_JS,
                 )
 
-        gr.Markdown("### Time Series")
+        gr.HTML(f'<h3 style="margin:12px 0 4px">Time Series</h3>')
         with gr.Row():
-            cape_plot = gr.Plot(label="CAPE / CIN / Helicity")
-            temp_plot = gr.Plot(label="Temperature / Dewpoint")
-            wind_plot = gr.Plot(label="Wind Speed")
-
-        gr.Markdown("### Vertical Profile & Analysis")
-        with gr.Row():
-            sounding_plot = gr.Plot(label="Skew-T Sounding")
-            hodo_plot = gr.Plot(label="Hodograph")
             with gr.Column():
-                synoptic_label = gr.Textbox(label="Synoptic Time", interactive=False, lines=1)
-                discussion_box = gr.Markdown(label="Mesoscale Discussion", value="")
+                gr.HTML(f'<div style="margin-bottom:2px"><b>CAPE / CIN / Helicity</b> {TIP_CAPE}</div>')
+                cape_plot = gr.Image(label="CAPE / CIN / Helicity", type="pil", show_label=False)
+            with gr.Column():
+                gr.HTML(f'<div style="margin-bottom:2px"><b>Temperature / Dewpoint</b> {TIP_TEMP}</div>')
+                temp_plot = gr.Image(label="Temperature / Dewpoint", type="pil", show_label=False)
+            with gr.Column():
+                gr.HTML(f'<div style="margin-bottom:2px"><b>Wind Speed</b> {TIP_WIND}</div>')
+                wind_plot = gr.Image(label="Wind Speed", type="pil", show_label=False)
 
+        gr.HTML(f'<h3 style="margin:12px 0 4px">Vertical Profile &amp; Analysis</h3>')
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=1):
+                gr.HTML(f'<div style="margin-bottom:2px"><b>Skew-T Sounding</b> {TIP_SKEWT}</div>')
+                sounding_plot = gr.Image(label="Skew-T Sounding", type="pil",
+                                         show_label=False, height=560)
+            with gr.Column(scale=1):
+                gr.HTML(f'<div style="margin-bottom:2px"><b>Hodograph</b> {TIP_HODO}</div>')
+                hodo_plot = gr.Image(label="Hodograph", type="pil",
+                                     show_label=False, height=560)
+            with gr.Column(scale=1):
+                synoptic_label = gr.Textbox(label="Synoptic Time", interactive=False, lines=1)
+                gr.HTML(f'<div style="margin-bottom:2px"><b>Mesoscale Discussion</b> {TIP_DISC}</div>')
+                discussion_box = gr.Markdown(
+                    label="Mesoscale Discussion", value="",
+                    height=500, show_label=False,
+                )
+
+        gr.HTML(f'<div style="margin:8px 0 4px"><b>Active Severe Weather Alerts</b> {TIP_ALERTS}</div>')
         alerts_table = gr.Dataframe(
             headers=["Severity", "Event", "Title", "Intensity", "GPS", "Source", "From", "To"],
-            label="Active Severe Weather Alerts", wrap=True,
+            label="Active Severe Weather Alerts", wrap=True, show_label=False,
         )
         status_log = gr.Textbox(label="Status Log", lines=6, interactive=False)
 
