@@ -24,6 +24,10 @@ try:
 except ImportError:
     HAS_CARTOPY = False
 
+import metpy.calc as mpcalc
+from metpy.plots import SkewT, Hodograph
+from metpy.units import units
+
 
 def _get_font(size=12):
     """Try to load a font, fall back to default if not found."""
@@ -413,6 +417,65 @@ def create_atmosphere_chart(data, chart_type):
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         plt.title('Wind Speed and Gusts')
+
+    plt.tight_layout()
+    return fig
+
+
+def create_sounding_chart(profile_data):
+    """Create a Skew-T Log-P sounding chart from atmospheric profile data.
+
+    Args:
+        profile_data: Dict with keys:
+            - pressure_levels: List of pressure levels (hPa)
+            - temperature: List of temperatures (°C)
+            - dewpoint: List of dewpoint temperatures (°C)
+            - wind_speed: List of wind speeds (m/s)
+            - wind_direction: List of wind directions (degrees)
+            - synoptic_time: Timestamp string
+            - latitude: Location latitude
+            - longitude: Location longitude
+
+    Returns:
+        matplotlib Figure
+    """
+    plt.style.use("dark_background")
+
+    pressure = np.array(profile_data["pressure_levels"], dtype=float) * units.hPa
+    temperature = np.array(profile_data["temperature"], dtype=float) * units.degC
+    dewpoint = np.array(profile_data["dewpoint"], dtype=float) * units.degC
+    wind_speed = np.array(profile_data["wind_speed"], dtype=float) * units('m/s')
+    wind_dir = np.array(profile_data["wind_direction"], dtype=float) * units.degrees
+
+    u, v = mpcalc.wind_components(wind_speed, wind_dir)
+
+    fig = plt.figure(figsize=(9, 9))
+    skew = SkewT(fig, rotation=45)
+
+    skew.plot(pressure, temperature, 'r', linewidth=2, label='Temperature')
+    skew.plot(pressure, dewpoint, 'g', linewidth=2, label='Dewpoint')
+    skew.plot_barbs(pressure, u, v)
+
+    try:
+        parcel_prof = mpcalc.parcel_profile(pressure, temperature[0], dewpoint[0]).to('degC')
+        skew.plot(pressure, parcel_prof, 'k', linewidth=1.5, linestyle='--', label='Parcel')
+        skew.shade_cape(pressure, temperature, parcel_prof, linewidth=0)
+        skew.shade_cin(pressure, temperature, parcel_prof, linewidth=0)
+    except Exception:
+        pass
+
+    skew.plot_dry_adiabats(alpha=0.2)
+    skew.plot_moist_adiabats(alpha=0.2)
+    skew.plot_mixing_lines(alpha=0.2)
+
+    skew.ax.set_ylim(1050, 100)
+    skew.ax.set_xlim(-40, 50)
+
+    synoptic = profile_data.get("synoptic_time", "")
+    lat = profile_data.get("latitude", "")
+    lon = profile_data.get("longitude", "")
+    skew.ax.set_title(f"Sounding — {synoptic}  ({lat}°, {lon}°)", fontsize=12)
+    skew.ax.legend(loc='upper left', fontsize=8)
 
     plt.tight_layout()
     return fig
