@@ -201,3 +201,46 @@ class TestVisualizationE2E:
         for chart_type in ["cape_cin", "temp_dewpoint", "wind"]:
             fig = create_atmosphere_chart(data, chart_type)
             assert isinstance(fig, matplotlib.figure.Figure)
+
+
+class TestSatelliteE2E:
+    def test_select_source_us(self):
+        from core.satellite import select_source
+        name, src = select_source(42.3, -83.0)
+        assert "goes" in name
+        assert "layer" in src
+
+    def test_select_source_europe(self):
+        from core.satellite import select_source
+        name, src = select_source(49.2, 16.6)
+        assert "meteosat" in name
+
+    def test_select_source_japan(self):
+        from core.satellite import select_source
+        name, src = select_source(35.7, 139.7)
+        assert "himawari" in name
+
+    def test_select_source_manual(self):
+        from core.satellite import select_source, SOURCES
+        name, src = select_source(42.3, -83.0, product="goes_east")
+        assert name == "goes_east"
+
+    def test_fetch_event_returns_typed(self):
+        import tempfile
+        from core.satellite import SatelliteClient
+        from core.cache import Cache
+        cache = Cache(tempfile.mkdtemp(), max_size_gb=0.1)
+        client = SatelliteClient(cache)
+        frames = _fetch_once("satellite_frames",
+                             lambda: client.fetch_event(
+                                 lat=42.3, lon=-83.0,
+                                 date="20260702", start_utc="1500", end_utc="1510",
+                                 product="goes_east_geocolor", zoom=2, bbox_deg=20,
+                             ))
+        assert isinstance(frames, list)
+        for f in frames:
+            assert isinstance(f, SatelliteFrame)
+            assert f.timestamp != ""
+            assert f.image is not None
+            assert f.source != ""
+            assert f.layer != ""
