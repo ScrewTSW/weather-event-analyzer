@@ -37,6 +37,9 @@ cache/
 output/
 verify_projection.py
 
+# Superpowers local context (specs, plans, restore, briefs)
+docs/superpowers/
+
 # OS
 .DS_Store
 Thumbs.db
