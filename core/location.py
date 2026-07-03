@@ -31,8 +31,10 @@ def parse_location_input(text: str) -> Optional[tuple[float, float]]:
 
 
 def geocode(query: str) -> tuple[float, float, str]:
-    url = f"https://nominatim.openstreetmap.org/search?q={query}&format=json&limit=1"
-    results = _req.fetch_json(url, cache_key=f"json/geocode/{query}.json", ttl=86400)
+    url = "https://nominatim.openstreetmap.org/search"
+    safe_key = query.replace("/", "_").replace("\\", "_")
+    results = _req.fetch_json(url, cache_key=f"json/geocode/{safe_key}.json", ttl=86400,
+                              params={"q": query, "format": "json", "limit": 1})
     if not results:
         raise ValueError(f"Could not geocode: {query!r}")
     r = results[0]

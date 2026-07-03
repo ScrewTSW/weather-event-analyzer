@@ -119,15 +119,16 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         def progress_html(text, pct):
             return f'<div style="position:relative;background:#222;border-radius:6px;height:28px;overflow:hidden"><div style="background:#2a7a3a;height:100%;width:{pct}%;transition:width 0.3s"></div><div style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;font-weight:bold">{text}</div></div>'
 
+        last_state = list(empty)
+        mapping = {"image": 0, "timeline": 1, "cape": 2, "temp": 3, "wind": 4,
+                   "info": 5, "alerts": 7, "sounding": 8, "hodo": 9,
+                   "discussion": 10, "synoptic_label": 11, "progress": 12}
+
         def out(**kw):
-            base = list(empty)
-            base[6] = "\n".join(log_lines)
-            mapping = {"image": 0, "timeline": 1, "cape": 2, "temp": 3, "wind": 4,
-                       "info": 5, "alerts": 7, "sounding": 8, "hodo": 9,
-                       "discussion": 10, "synoptic_label": 11, "progress": 12}
             for k, v in kw.items():
-                base[mapping[k]] = v
-            return tuple(base)
+                last_state[mapping[k]] = v
+            last_state[6] = "\n".join(log_lines)
+            return tuple(last_state)
 
         try:
             from datetime import datetime, timedelta
@@ -140,9 +141,11 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             if not location_str or not location_str.strip():
                 log("ERROR: Enter a location"); yield out(); return
 
-            date = (date or "").strip() or now.strftime("%Y-%m-%d")
-            start_utc = (start_utc or "").strip() or (now - timedelta(hours=2)).strftime("%H:%M")
-            end_utc = (end_utc or "").strip() or now.strftime("%H:%M")
+            date = (date or "").strip()
+            start_utc = (start_utc or "").strip()
+            end_utc = (end_utc or "").strip()
+            is_live = not date and not start_utc and not end_utc
+            date = date or now.strftime("%Y-%m-%d")
 
             log("Resolving location...")
             yield out(progress=progress_html("Resolving location...", 5))
@@ -152,6 +155,27 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             log(f"Location: {display}")
             log(f"Satellite: {satellite['name']}")
             yield out(info=info, progress=progress_html("Resolving location...", 5))
+
+            # Probe for latest available satellite frame when using live mode
+            if is_live:
+                log("Probing for latest satellite data...")
+                yield out(info=info, progress=progress_html("Probing latest satellite data...", 8))
+                bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
+                latest = sat_client.probe_latest(lat, lon, product=product, bbox_deg=bbox_deg)
+                if latest:
+                    from datetime import datetime as dt_parse
+                    latest_dt = dt_parse.fromisoformat(latest.replace("Z", ""))
+                    end_utc = latest_dt.strftime("%H:%M")
+                    start_utc = (latest_dt - timedelta(hours=2)).strftime("%H:%M")
+                    date = latest_dt.strftime("%Y-%m-%d")
+                    log(f"Latest frame: {latest} — window {start_utc}-{end_utc} UTC")
+                else:
+                    start_utc = (now - timedelta(hours=2)).strftime("%H:%M")
+                    end_utc = now.strftime("%H:%M")
+                    log("Could not probe latest — using approximate time")
+            else:
+                start_utc = start_utc or (now - timedelta(hours=2)).strftime("%H:%M")
+                end_utc = end_utc or now.strftime("%H:%M")
 
             def _fig_to_pil(fig):
                 buf = io.BytesIO()
@@ -234,7 +258,8 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                       synoptic_label=synoptic_label, progress=progress_html("Fetching mesoscale discussions...", 70))
 
             # 5. Frontal analysis (optional)
-            bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
+            if not is_live:
+                bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
             detected_fronts = None
             if show_fronts:
                 log("Running frontal analysis...")
@@ -295,7 +320,8 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         except Exception as e:
             import traceback
             log_lines.append(f"ERROR: {e}\n{traceback.format_exc()}")
-            yield out()
+            error_bar = f'<div style="position:relative;background:#4a1111;border-radius:6px;height:28px;overflow:hidden"><div style="background:#8b0000;height:100%;width:100%"></div><div style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;font-weight:bold">Error: {str(e)[:80]}</div></div>'
+            yield out(progress=error_bar)
 
     def on_frame_change(timeline_value, evt: gr.EventData = None):
         """Called when the timeline slider triggers 'change' via JS trigger()."""
@@ -328,7 +354,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                margin-left:-6px; border-width:6px; border-style:solid;
                border-color:#1a1a2e transparent transparent transparent; }
     #wea-progress { position:fixed !important; top:0 !important; left:0 !important;
-                    right:0 !important; z-index:9999 !important;
+                    right:0 !important; z-index:999 !important;
                     padding:0 !important; margin:0 !important; }
     #wea-progress > div { border-radius:0 !important; }
     .gradio-container { padding-top:32px !important; }

@@ -13,7 +13,7 @@ from urllib.parse import urlparse
 import requests
 
 
-USER_AGENT = "WeatherEventAnalyzer/1.0"
+USER_AGENT = "WeatherEventAnalyzer/1.0 (https://github.com/ScrewTSW/weather-event-analyzer)"
 
 # Per-domain rate limits based on API usage policies
 # Sources:
@@ -135,7 +135,7 @@ class CachedRequest:
 
     def __init__(self, session: requests.Session = None, cache=None):
         self.session = session or requests.Session()
-        self.session.headers.setdefault("User-Agent", USER_AGENT)
+        self.session.headers["User-Agent"] = USER_AGENT
         self.cache = cache
         self.stats = RequestStats()
         self._last_request_per_domain: dict[str, float] = {}
@@ -158,7 +158,7 @@ class CachedRequest:
         return urlparse(url).hostname or ""
 
     def fetch_json(self, url: str, cache_key: str = None,
-                   ttl: int = 3600) -> dict:
+                   ttl: int = 3600, params: dict = None) -> dict:
         if cache_key and self.cache:
             cached = self.cache.get_json(cache_key, ttl=ttl)
             if cached is not None:
@@ -167,7 +167,7 @@ class CachedRequest:
 
         self._rate_limit(url)
         self.stats.record_api_call(self._domain(url))
-        resp = self.session.get(url, timeout=30)
+        resp = self.session.get(url, params=params, timeout=30)
         resp.raise_for_status()
         raw = resp.json()
 

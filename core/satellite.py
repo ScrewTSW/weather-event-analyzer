@@ -91,7 +91,7 @@ class SatelliteClient:
         self.req = CachedRequest(cache=cache)
 
     def _fetch_image(self, url: str, cache_key: str) -> Optional[Image.Image]:
-        data = self.req.fetch_binary(url, cache_key=cache_key, rate_limit=0.15)
+        data = self.req.fetch_binary(url, cache_key=cache_key)
         if data:
             return Image.open(io.BytesIO(data)).convert("RGBA")
         return None
@@ -149,9 +149,30 @@ class SatelliteClient:
 
         return composite
 
+    def probe_latest(self, lat: float, lon: float, product: str = "auto",
+                     bbox_deg: float = 20.0) -> str | None:
+        """Find the latest available satellite frame by probing backward from now."""
+        from datetime import datetime, timedelta, timezone
+        source_name, source = select_source(lat, lon, product)
+        cadence = source.get("cadence_min", 15)
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
+        # Snap to cadence grid
+        snapped = now.replace(minute=(now.minute // cadence) * cadence, second=0, microsecond=0)
+
+        for offset in range(0, 12):  # Try up to 2 hours back
+            probe_time = snapped - timedelta(minutes=offset * cadence)
+            ts = probe_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            if source["type"] in ("gibs_wms", "eumetsat_wms"):
+                img = self.fetch_wms_image(source, ts, lat, lon, bbox_deg, size=256)
+            else:
+                img = self.fetch_wmts_tiles(source, ts, lat, lon, bbox_deg, zoom=2)
+            if img:
+                return ts
+        return None
+
     def fetch_event(self, lat: float, lon: float, date: str, start_utc: str, end_utc: str,
                     product: str = "auto", zoom: int = 4, bbox_deg: float = 20.0,
-                    on_progress=None) -> list[dict]:
+                    on_progress=None) -> list:
         source_name, source = select_source(lat, lon, product)
         cadence = source.get("cadence_min", 15)
 
