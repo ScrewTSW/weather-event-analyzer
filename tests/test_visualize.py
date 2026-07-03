@@ -10,6 +10,7 @@ from core.visualize import (
     create_timelapse_gif,
     create_timelapse_mp4,
 )
+from core.models.pressure_levels.base import PressureLevelSnapshot, PressureLevelHourly
 
 
 class TestTimestampLabel:
@@ -54,62 +55,70 @@ class TestComposeFrame:
 
 class TestAtmosphereChart:
     def test_cape_cin_chart(self):
-        data = {
-            "timestamps": ["2026-05-31T07:00", "2026-05-31T08:00", "2026-05-31T09:00"],
-            "variables": {
-                "cape": {"data": [500, 1200, 1800], "unit": "J/kg"},
-                "cin": {"data": [20, 15, 5], "unit": "J/kg"},
+        from core.models.atmosphere.base import AtmosphereData, VariableTimeSeries
+        data = AtmosphereData(
+            source="test",
+            timestamps=["2026-05-31T07:00", "2026-05-31T08:00", "2026-05-31T09:00"],
+            variables={
+                "cape": VariableTimeSeries(data=[500, 1200, 1800], unit="J/kg"),
+                "cin": VariableTimeSeries(data=[20, 15, 5], unit="J/kg"),
             },
-        }
+        )
         fig = create_atmosphere_chart(data, chart_type="cape_cin")
         assert fig is not None
 
     def test_temp_dewpoint_chart(self):
-        data = {
-            "timestamps": ["2026-05-31T07:00", "2026-05-31T08:00"],
-            "variables": {
-                "temperature": {"data": [25.0, 28.0], "unit": "C"},
-                "dewpoint": {"data": [18.0, 19.0], "unit": "C"},
+        from core.models.atmosphere.base import AtmosphereData, VariableTimeSeries
+        data = AtmosphereData(
+            source="test",
+            timestamps=["2026-05-31T07:00", "2026-05-31T08:00"],
+            variables={
+                "temperature": VariableTimeSeries(data=[25.0, 28.0], unit="C"),
+                "dewpoint": VariableTimeSeries(data=[18.0, 19.0], unit="C"),
             },
-        }
+        )
         fig = create_atmosphere_chart(data, chart_type="temp_dewpoint")
         assert fig is not None
 
     def test_wind_chart(self):
-        data = {
-            "timestamps": ["2026-05-31T07:00", "2026-05-31T08:00"],
-            "variables": {
-                "wind_speed": {"data": [5.0, 8.0], "unit": "m/s"},
-                "wind_gusts": {"data": [12.0, 18.0], "unit": "m/s"},
-                "wind_direction": {"data": [225, 230], "unit": "deg"},
+        from core.models.atmosphere.base import AtmosphereData, VariableTimeSeries
+        data = AtmosphereData(
+            source="test",
+            timestamps=["2026-05-31T07:00", "2026-05-31T08:00"],
+            variables={
+                "wind_speed": VariableTimeSeries(data=[5.0, 8.0], unit="m/s"),
+                "wind_gusts": VariableTimeSeries(data=[12.0, 18.0], unit="m/s"),
+                "wind_direction": VariableTimeSeries(data=[225, 230], unit="deg"),
             },
-        }
+        )
         fig = create_atmosphere_chart(data, chart_type="wind")
         assert fig is not None
 
     def test_cape_cin_with_helicity(self):
-        data = {
-            "timestamps": ["2026-07-02T07:00", "2026-07-02T08:00", "2026-07-02T09:00"],
-            "variables": {
-                "cape": {"data": [500, 1200, 1800], "unit": "J/kg"},
-                "cin": {"data": [20, 15, 5], "unit": "J/kg"},
+        from core.models.atmosphere.base import AtmosphereData, VariableTimeSeries
+        data = AtmosphereData(
+            source="test",
+            timestamps=["2026-07-02T07:00", "2026-07-02T08:00", "2026-07-02T09:00"],
+            variables={
+                "cape": VariableTimeSeries(data=[500, 1200, 1800], unit="J/kg"),
+                "cin": VariableTimeSeries(data=[20, 15, 5], unit="J/kg"),
             },
-        }
+        )
         levels = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500,
                   400, 300, 250, 200, 150, 100, 70, 50, 30]
         n = len(levels)
-        profile_hourly = {
-            "source": "open-meteo-pressure",
-            "pressure_levels": levels,
-            "timestamps": ["2026-07-02T07:00", "2026-07-02T08:00", "2026-07-02T09:00"],
-            "wind_speed": [[5 + j for j in range(n)] for _ in range(3)],
-            "wind_direction": [[180 + j * 10 for j in range(n)] for _ in range(3)],
-            "geopotential_height": [[100, 320, 500, 800, 1000, 1500, 1900,
-                                     3000, 4200, 5600, 7200, 9200, 10400,
-                                     11800, 13500, 15800, 17700, 19300, 22000]] * 3,
-            "temperature": [[20 - j for j in range(n)] for _ in range(3)],
-            "dewpoint": [[15 - j for j in range(n)] for _ in range(3)],
-        }
+        profile_hourly = PressureLevelHourly(
+            source="open-meteo-pressure",
+            pressure_levels=levels,
+            timestamps=["2026-07-02T07:00", "2026-07-02T08:00", "2026-07-02T09:00"],
+            wind_speed=[[5 + j for j in range(n)] for _ in range(3)],
+            wind_direction=[[180 + j * 10 for j in range(n)] for _ in range(3)],
+            geopotential_height=[[100, 320, 500, 800, 1000, 1500, 1900,
+                                  3000, 4200, 5600, 7200, 9200, 10400,
+                                  11800, 13500, 15800, 17700, 19300, 22000]] * 3,
+            temperature=[[20 - j for j in range(n)] for _ in range(3)],
+            dewpoint=[[15 - j for j in range(n)] for _ in range(3)],
+        )
         fig = create_atmosphere_chart(data, "cape_cin", profile_hourly=profile_hourly)
         assert fig is not None
         axes = fig.axes
@@ -137,19 +146,18 @@ class TestSoundingChart:
         levels = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500,
                   400, 300, 250, 200, 150, 100, 70, 50, 30]
         n = len(levels)
-        return {
-            "source": "open-meteo-pressure",
-            "synoptic_time": "2026-07-02T12:00",
-            "pressure_levels": levels,
-            "temperature": [30 - i * 2 for i in range(n)],
-            "dewpoint": [20 - i * 2.5 for i in range(n)],
-            "wind_speed": [5 + i * 1.5 for i in range(n)],
-            "wind_direction": [180 + i * 5 for i in range(n)],
-            "geopotential_height": [100 + i * 500 for i in range(n)],
-            "latitude": 35.0,
-            "longitude": -97.0,
-            "timestamps": None,
-        }
+        return PressureLevelSnapshot(
+            source="open-meteo-pressure",
+            synoptic_time="2026-07-02T12:00",
+            pressure_levels=levels,
+            temperature=[30 - i * 2 for i in range(n)],
+            dewpoint=[20 - i * 2.5 for i in range(n)],
+            wind_speed=[5 + i * 1.5 for i in range(n)],
+            wind_direction=[180 + i * 5 for i in range(n)],
+            geopotential_height=[100 + i * 500 for i in range(n)],
+            latitude=35.0,
+            longitude=-97.0,
+        )
 
     def test_returns_figure(self):
         fig = create_sounding_chart(self._make_profile())
@@ -169,21 +177,20 @@ class TestHodographChart:
         levels = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500,
                   400, 300, 250, 200, 150, 100, 70, 50, 30]
         n = len(levels)
-        return {
-            "source": "open-meteo-pressure",
-            "synoptic_time": "2026-07-02T12:00",
-            "pressure_levels": levels,
-            "temperature": [30 - i * 2 for i in range(n)],
-            "dewpoint": [20 - i * 2.5 for i in range(n)],
-            "wind_speed": [5 + i * 1.5 for i in range(n)],
-            "wind_direction": [180 + i * 10 for i in range(n)],
-            "geopotential_height": [100, 320, 500, 800, 1000, 1500, 1900,
-                                    3000, 4200, 5600, 7200, 9200, 10400,
-                                    11800, 13500, 15800, 17700, 19300, 22000],
-            "latitude": 35.0,
-            "longitude": -97.0,
-            "timestamps": None,
-        }
+        return PressureLevelSnapshot(
+            source="open-meteo-pressure",
+            synoptic_time="2026-07-02T12:00",
+            pressure_levels=levels,
+            temperature=[30 - i * 2 for i in range(n)],
+            dewpoint=[20 - i * 2.5 for i in range(n)],
+            wind_speed=[5 + i * 1.5 for i in range(n)],
+            wind_direction=[180 + i * 10 for i in range(n)],
+            geopotential_height=[100, 320, 500, 800, 1000, 1500, 1900,
+                                 3000, 4200, 5600, 7200, 9200, 10400,
+                                 11800, 13500, 15800, 17700, 19300, 22000],
+            latitude=35.0,
+            longitude=-97.0,
+        )
 
     def test_returns_figure(self):
         fig = create_hodograph_chart(self._make_profile())

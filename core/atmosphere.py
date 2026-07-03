@@ -3,6 +3,8 @@ from typing import Optional
 
 import requests
 
+from core.models.atmosphere.base import AtmosphereData, VariableTimeSeries
+
 USER_AGENT = "WeatherEventAnalyzer/1.0"
 
 FORECAST_VARS = (
@@ -66,7 +68,7 @@ def select_gfs_run(event_time_utc: str) -> tuple[str, str]:
     return f"{best_run:02d}", f"{forecast_h:03d}"
 
 
-def parse_openmeteo_response(data: dict, source: str) -> dict:
+def parse_openmeteo_response(data: dict, source: str) -> AtmosphereData:
     hourly = data.get("hourly", {})
     timestamps = hourly.get("time", [])
 
@@ -86,19 +88,19 @@ def parse_openmeteo_response(data: dict, source: str) -> dict:
     variables = {}
     for name, key in var_map.items():
         if key in hourly:
-            variables[name] = {
-                "data": hourly[key],
-                "unit": _get_unit(name),
-            }
+            variables[name] = VariableTimeSeries(
+                data=hourly[key],
+                unit=_get_unit(name),
+            )
 
-    return {
-        "source": source,
-        "gridded": False,
-        "timestamps": timestamps,
-        "variables": variables,
-        "latitude": data.get("latitude"),
-        "longitude": data.get("longitude"),
-    }
+    return AtmosphereData(
+        source=source,
+        gridded=False,
+        timestamps=timestamps,
+        variables=variables,
+        latitude=data.get("latitude"),
+        longitude=data.get("longitude"),
+    )
 
 
 def _get_unit(var_name: str) -> str:
@@ -116,37 +118,42 @@ class OpenMeteoClient:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
 
-    def fetch_forecast(self, lat: float, lon: float, past_days: int = 7) -> dict:
+    def fetch_forecast(self, lat: float, lon: float, past_days: int = 7) -> AtmosphereData:
         url = build_openmeteo_forecast_url(lat, lon, past_days)
         time.sleep(0.3)
         resp = self.session.get(url, timeout=15)
         resp.raise_for_status()
         return parse_openmeteo_response(resp.json(), source="open-meteo-forecast")
 
-    def fetch_archive(self, lat: float, lon: float, date: str) -> dict:
+    def fetch_archive(self, lat: float, lon: float, date: str) -> AtmosphereData:
         url = build_openmeteo_archive_url(lat, lon, date)
         time.sleep(0.3)
         resp = self.session.get(url, timeout=15)
         resp.raise_for_status()
         return parse_openmeteo_response(resp.json(), source="open-meteo-archive")
 
-    def fetch(self, lat: float, lon: float, date: str) -> dict:
+    def fetch(self, lat: float, lon: float, date: str) -> AtmosphereData:
         # Try forecast first (has CAPE, 7-day lookback)
         try:
             result = self.fetch_forecast(lat, lon, past_days=7)
             # Filter to requested date
             filtered_ts = []
-            filtered_vars = {k: {"data": [], "unit": v["unit"]} for k, v in result["variables"].items()}
-            for i, ts in enumerate(result["timestamps"]):
+            filtered_vars = {k: VariableTimeSeries(data=[], unit=v.unit) for k, v in result.variables.items()}
+            for i, ts in enumerate(result.timestamps):
                 if ts.startswith(date):
                     filtered_ts.append(ts)
                     for k in filtered_vars:
-                        if k in result["variables"]:
-                            filtered_vars[k]["data"].append(result["variables"][k]["data"][i])
+                        if k in result.variables:
+                            filtered_vars[k].data.append(result.variables[k].data[i])
             if filtered_ts:
-                result["timestamps"] = filtered_ts
-                result["variables"] = filtered_vars
-                return result
+                return AtmosphereData(
+                    source=result.source,
+                    gridded=result.gridded,
+                    timestamps=filtered_ts,
+                    variables=filtered_vars,
+                    latitude=result.latitude,
+                    longitude=result.longitude,
+                )
         except Exception:
             pass
 

@@ -5,6 +5,8 @@ import time
 
 import requests
 
+from core.models import Discussion
+
 
 def _clean_html(raw):
     text = re.sub(r'<script[^>]*>.*?</script>', '', raw, flags=re.DOTALL | re.IGNORECASE)
@@ -102,11 +104,11 @@ class MesoscaleDiscussionClient:
                         text = _clean_html(md_resp.text)
                     number = re.search(r'md(\d+)', link)
                     title = f"SPC Mesoscale Discussion #{number.group(1)}" if number else "SPC MD"
-                    results.append({
-                        "source": "spc_md", "region": "US",
-                        "title": title, "text": text[:3000],
-                        "valid_from": "", "valid_to": "", "url": md_url,
-                    })
+                    results.append(Discussion(
+                        source="spc_md", region="US",
+                        title=title, text=text[:3000],
+                        valid_from="", valid_to="", url=md_url,
+                    ))
             return results
         except Exception as e:
             logger.warning(f"SPC MD fetch failed: {e}")
@@ -118,13 +120,13 @@ class MesoscaleDiscussionClient:
             time.sleep(0.3)
             resp = self.session.get(url, timeout=15)
             if resp.status_code == 200:
-                return [{
-                    "source": "spc_outlook", "region": "US",
-                    "title": "SPC Day 1 Convective Outlook",
-                    "text": resp.text[:3000],
-                    "valid_from": "", "valid_to": "",
-                    "url": "https://www.spc.noaa.gov/products/outlook/day1otlk.html",
-                }]
+                return [Discussion(
+                    source="spc_outlook", region="US",
+                    title="SPC Day 1 Convective Outlook",
+                    text=resp.text[:3000],
+                    valid_from="", valid_to="",
+                    url="https://www.spc.noaa.gov/products/outlook/day1otlk.html",
+                )]
         except Exception as e:
             logger.warning(f"SPC outlook fetch failed: {e}")
         return []
@@ -136,12 +138,12 @@ class MesoscaleDiscussionClient:
             resp = self.session.get(url, timeout=15)
             if resp.status_code == 200:
                 text = _clean_html(resp.text)
-                return [{
-                    "source": "estofex", "region": "Europe",
-                    "title": "ESTOFEX Convective Forecast",
-                    "text": text[:3000],
-                    "valid_from": "", "valid_to": "", "url": url,
-                }]
+                return [Discussion(
+                    source="estofex", region="Europe",
+                    title="ESTOFEX Convective Forecast",
+                    text=text[:3000],
+                    valid_from="", valid_to="", url=url,
+                )]
         except Exception as e:
             logger.warning(f"ESTOFEX fetch failed: {e}")
         return []
@@ -152,12 +154,12 @@ class MesoscaleDiscussionClient:
             time.sleep(0.3)
             resp = self.session.get(url, timeout=15)
             if resp.status_code == 200:
-                return [{
-                    "source": "eccc", "region": "Canada",
-                    "title": "Environment Canada Alerts",
-                    "text": "See ECCC alerts feed for current warnings.",
-                    "valid_from": "", "valid_to": "", "url": url,
-                }]
+                return [Discussion(
+                    source="eccc", region="Canada",
+                    title="Environment Canada Alerts",
+                    text="See ECCC alerts feed for current warnings.",
+                    valid_from="", valid_to="", url=url,
+                )]
         except Exception as e:
             logger.warning(f"ECCC fetch failed: {e}")
         return []
@@ -174,29 +176,29 @@ class MesoscaleDiscussionClient:
                 for w in warnings[:5]:
                     title = w.get("title", "BOM Warning") if isinstance(w, dict) else "BOM Warning"
                     text = w.get("short_text", "") if isinstance(w, dict) else str(w)
-                    results.append({
-                        "source": "bom", "region": "Australia",
-                        "title": title, "text": text[:3000],
-                        "valid_from": "", "valid_to": "", "url": url,
-                    })
+                    results.append(Discussion(
+                        source="bom", region="Australia",
+                        title=title, text=text[:3000],
+                        valid_from="", valid_to="", url=url,
+                    ))
                 return results
         except Exception as e:
             logger.warning(f"BOM fetch failed: {e}")
         return []
 
     def _fetch_jma(self):
-        return [{"source": "jma", "region": "Japan",
-                 "title": "JMA Severe Weather Information",
-                 "text": "See xml.kishou.go.jp for JMA alerts (Japanese).",
-                 "valid_from": "", "valid_to": "",
-                 "url": "https://xml.kishou.go.jp/xmlpull.html"}]
+        return [Discussion(source="jma", region="Japan",
+                           title="JMA Severe Weather Information",
+                           text="See xml.kishou.go.jp for JMA alerts (Japanese).",
+                           valid_from="", valid_to="",
+                           url="https://xml.kishou.go.jp/xmlpull.html")]
 
     def _fetch_imd(self):
-        return [{"source": "imd", "region": "India",
-                 "title": "IMD Nowcast/Warnings",
-                 "text": "See mausam.imd.gov.in for IMD warnings.",
-                 "valid_from": "", "valid_to": "",
-                 "url": "https://mausam.imd.gov.in"}]
+        return [Discussion(source="imd", region="India",
+                           title="IMD Nowcast/Warnings",
+                           text="See mausam.imd.gov.in for IMD warnings.",
+                           valid_from="", valid_to="",
+                           url="https://mausam.imd.gov.in")]
 
     def _fetch_smn(self):
         url = "https://ws.smn.gob.ar/alerts/type/AL"
@@ -207,42 +209,42 @@ class MesoscaleDiscussionClient:
                 data = resp.json()
                 results = []
                 for alert in (data if isinstance(data, list) else [])[:5]:
-                    results.append({
-                        "source": "smn", "region": "Argentina",
-                        "title": alert.get("title", "SMN Alert"),
-                        "text": alert.get("description", "")[:3000],
-                        "valid_from": alert.get("date", ""),
-                        "valid_to": "", "url": url,
-                    })
+                    results.append(Discussion(
+                        source="smn", region="Argentina",
+                        title=alert.get("title", "SMN Alert"),
+                        text=alert.get("description", "")[:3000],
+                        valid_from=alert.get("date", ""),
+                        valid_to="", url=url,
+                    ))
                 return results
         except Exception as e:
             logger.warning(f"SMN fetch failed: {e}")
         return []
 
     def _fetch_inmet(self):
-        return [{"source": "inmet", "region": "Brazil",
-                 "title": "INMET Warnings",
-                 "text": "See apiprevmet3.inmet.gov.br for INMET alerts.",
-                 "valid_from": "", "valid_to": "",
-                 "url": "https://apiprevmet3.inmet.gov.br/avisos/rss"}]
+        return [Discussion(source="inmet", region="Brazil",
+                           title="INMET Warnings",
+                           text="See apiprevmet3.inmet.gov.br for INMET alerts.",
+                           valid_from="", valid_to="",
+                           url="https://apiprevmet3.inmet.gov.br/avisos/rss")]
 
     def _fetch_tmd(self):
-        return [{"source": "tmd", "region": "Thailand",
-                 "title": "TMD Weather Warnings",
-                 "text": "See data.tmd.go.th for TMD alerts.",
-                 "valid_from": "", "valid_to": "",
-                 "url": "https://data.tmd.go.th/api/"}]
+        return [Discussion(source="tmd", region="Thailand",
+                           title="TMD Weather Warnings",
+                           text="See data.tmd.go.th for TMD alerts.",
+                           valid_from="", valid_to="",
+                           url="https://data.tmd.go.th/api/")]
 
     def _fetch_saws(self):
-        return [{"source": "saws", "region": "South Africa",
-                 "title": "SAWS Warnings",
-                 "text": "See weathersa.co.za for SAWS warnings.",
-                 "valid_from": "", "valid_to": "",
-                 "url": "https://www.weathersa.co.za/home/warnings"}]
+        return [Discussion(source="saws", region="South Africa",
+                           title="SAWS Warnings",
+                           text="See weathersa.co.za for SAWS warnings.",
+                           valid_from="", valid_to="",
+                           url="https://www.weathersa.co.za/home/warnings")]
 
     def _fetch_wmo(self):
-        return [{"source": "wmo_swic", "region": "Global",
-                 "title": "WMO Severe Weather Information Centre",
-                 "text": "See severeweather.wmo.int for global severe weather alerts.",
-                 "valid_from": "", "valid_to": "",
-                 "url": "https://severeweather.wmo.int"}]
+        return [Discussion(source="wmo_swic", region="Global",
+                           title="WMO Severe Weather Information Centre",
+                           text="See severeweather.wmo.int for global severe weather alerts.",
+                           valid_from="", valid_to="",
+                           url="https://severeweather.wmo.int")]

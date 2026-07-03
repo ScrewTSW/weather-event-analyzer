@@ -88,16 +88,16 @@ def _run_satellite(args, cache):
 
     composed_frames = []
     for frame in frames:
-        ts = frame["timestamp"]
+        ts = frame.timestamp
         ts_str = str(ts)
         ts_formatted = f"{ts_str[:4]}-{ts_str[4:6]}-{ts_str[6:8]} {ts_str[8:10]}:{ts_str[10:12]} UTC"
         composed = compose_frame(
-            satellite_image=frame["image"],
+            satellite_image=frame.image,
             timestamp=ts_formatted,
             satellite_name=satellite["name"],
             location_str=display,
-            center_x=frame["image"].width // 2,
-            center_y=frame["image"].height // 2,
+            center_x=frame.image.width // 2,
+            center_y=frame.image.height // 2,
         )
         path = output_dir / f"satellite_{ts}.png"
         composed.save(path)
@@ -130,8 +130,8 @@ def _run_atmosphere(args, cache):
 
     client = OpenMeteoClient()
     data = client.fetch(lat, lon, args.date)
-    print(f"Source: {data['source']}")
-    print(f"Timestamps: {len(data['timestamps'])}")
+    print(f"Source: {data.source}")
+    print(f"Timestamps: {len(data.timestamps)}")
 
     output_dir = Path(args.output) / f"{display.replace(' ', '_').replace(',', '')}_{args.date}"
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -197,10 +197,10 @@ def _run_alerts(args, cache):
     print(f"Found {len(alerts)} alerts:")
     print(f"{'='*80}")
     for a in alerts:
-        severity = a['severity'].upper()
+        severity = a.severity.upper()
         marker = {'EXTREME': '!!!', 'SEVERE': '!! ', 'MODERATE': '!  ', 'MINOR': '   '}.get(severity, '   ')
-        print(f"\n{marker} [{severity}] {a['event_type']}")
-        print(f"    {a['title']}")
-        if a.get('valid_from'):
-            print(f"    From: {a['valid_from'][:19]}  To: {a.get('valid_to', 'ongoing')[:19]}")
-        print(f"    Source: {a.get('source', 'unknown')}")
+        print(f"\n{marker} [{severity}] {a.event_type}")
+        print(f"    {a.title}")
+        if a.valid_from:
+            print(f"    From: {a.valid_from[:19]}  To: {a.valid_to[:19] if a.valid_to else 'ongoing'}")
+        print(f"    Source: {a.source}")

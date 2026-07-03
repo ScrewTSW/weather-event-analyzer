@@ -8,6 +8,7 @@ from core.fronts import (
     detect_mergers,
     FrontalAnalyzer,
 )
+from core.models import FrontalFeature
 
 
 class TestTFP:
@@ -66,20 +67,20 @@ class TestDryLineDetection:
 class TestMergerDetection:
     def test_nearby_fronts_flagged_as_merger(self):
         fronts = [
-            {"type": "cold", "lats": [40.0, 40.5], "lons": [-95.0, -95.0], "is_merger": False, "label": ""},
-            {"type": "warm", "lats": [40.1, 40.6], "lons": [-95.0, -95.0], "is_merger": False, "label": ""},
+            FrontalFeature(type="cold", lats=[40.0, 40.5], lons=[-95.0, -95.0], is_merger=False, label=""),
+            FrontalFeature(type="warm", lats=[40.1, 40.6], lons=[-95.0, -95.0], is_merger=False, label=""),
         ]
         result = detect_mergers(fronts, threshold_km=50)
-        mergers = [f for f in result if f["is_merger"]]
+        mergers = [f for f in result if f.is_merger]
         assert len(mergers) > 0
 
     def test_distant_fronts_not_merged(self):
         fronts = [
-            {"type": "cold", "lats": [30.0], "lons": [-95.0], "is_merger": False, "label": ""},
-            {"type": "warm", "lats": [50.0], "lons": [-80.0], "is_merger": False, "label": ""},
+            FrontalFeature(type="cold", lats=[30.0], lons=[-95.0], is_merger=False, label=""),
+            FrontalFeature(type="warm", lats=[50.0], lons=[-80.0], is_merger=False, label=""),
         ]
         result = detect_mergers(fronts, threshold_km=50)
-        mergers = [f for f in result if f["is_merger"]]
+        mergers = [f for f in result if f.is_merger]
         assert len(mergers) == 0
 
 

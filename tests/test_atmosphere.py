@@ -72,11 +72,11 @@ class TestParseOpenMeteoResponse:
             },
         }
         result = parse_openmeteo_response(mock_json, source="open-meteo-forecast")
-        assert result["source"] == "open-meteo-forecast"
-        assert result["gridded"] is False
-        assert len(result["timestamps"]) == 2
-        assert result["variables"]["temperature"]["data"] == [20.5, 19.3]
-        assert result["variables"]["cape"]["data"] == [450.0, 380.0]
+        assert result.source == "open-meteo-forecast"
+        assert result.gridded is False
+        assert len(result.timestamps) == 2
+        assert result.variables["temperature"].data == [20.5, 19.3]
+        assert result.variables["cape"].data == [450.0, 380.0]
 
 
 class TestAtmosphereIntegration:
@@ -84,7 +84,7 @@ class TestAtmosphereIntegration:
     def test_fetch_forecast_has_cape(self):
         client = OpenMeteoClient()
         result = client.fetch_forecast(45.75, 126.65, past_days=1)
-        assert result["source"] == "open-meteo-forecast"
-        assert "cape" in result["variables"]
-        cape_data = result["variables"]["cape"]["data"]
+        assert result.source == "open-meteo-forecast"
+        assert "cape" in result.variables
+        cape_data = result.variables["cape"].data
         assert any(v is not None for v in cape_data)

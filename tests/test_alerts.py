@@ -16,6 +16,7 @@ from core.alerts import (
     MeteoAlarmClient,
     fetch_alerts,
 )
+from core.models.alerts.base import Alert, SourceResult
 
 
 class TestGDACSClient:
@@ -55,14 +56,14 @@ class TestGDACSClient:
         client = GDACSClient()
         result = client.fetch_current_alerts()
 
-        assert result["source"] == "gdacs"
-        assert len(result["alerts"]) == 1
-        alert = result["alerts"][0]
-        assert alert["event_type"] == "earthquake"
-        assert alert["severity"] == "extreme"
-        assert alert["title"] == "M 7.5 Earthquake"
-        assert alert["geometry"]["type"] == "Point"
-        assert alert["valid_from"] == "2026-06-01T10:00:00"
+        assert result.source == "gdacs"
+        assert len(result.alerts) == 1
+        alert = result.alerts[0]
+        assert alert.event_type == "earthquake"
+        assert alert.severity == "extreme"
+        assert alert.title == "M 7.5 Earthquake"
+        assert alert.geometry["type"] == "Point"
+        assert alert.valid_from == "2026-06-01T10:00:00"
 
     @patch('requests.Session.get')
     def test_gdacs_historical_alerts(self, mock_get):
@@ -94,9 +95,9 @@ class TestGDACSClient:
         client = GDACSClient()
         result = client.fetch_historical_alerts("2026-05-31", "2026-06-01")
 
-        assert len(result["alerts"]) == 1
-        assert result["alerts"][0]["event_type"] == "cyclone"
-        assert result["alerts"][0]["severity"] == "severe"
+        assert len(result.alerts) == 1
+        assert result.alerts[0].event_type == "cyclone"
+        assert result.alerts[0].severity == "severe"
 
 
 class TestNWSClient:
@@ -140,13 +141,13 @@ class TestNWSClient:
         client = NWSClient()
         result = client.fetch_current_alerts()
 
-        assert result["source"] == "nws"
-        assert len(result["alerts"]) == 1
-        alert = result["alerts"][0]
-        assert alert["event_type"] == "tornado_warning"
-        assert alert["severity"] == "extreme"
-        assert alert["geometry"]["type"] == "Polygon"
-        assert "tornadoDetection" in alert["properties"]["parameters"]
+        assert result.source == "nws"
+        assert len(result.alerts) == 1
+        alert = result.alerts[0]
+        assert alert.event_type == "tornado_warning"
+        assert alert.severity == "extreme"
+        assert alert.geometry["type"] == "Polygon"
+        assert "tornadoDetection" in alert.properties["parameters"]
 
 
 class TestESTOFEXClient:
@@ -180,16 +181,16 @@ class TestESTOFEXClient:
         client = ESTOFEXClient()
         result = client.fetch_current_alerts()
 
-        assert result["source"] == "estofex"
-        assert len(result["alerts"]) == 2
+        assert result.source == "estofex"
+        assert len(result.alerts) == 2
 
-        level2 = [a for a in result["alerts"] if a["event_type"] == "convective_level2"][0]
-        assert level2["severity"] == "severe"
-        assert level2["geometry"]["type"] == "Polygon"
-        assert len(level2["geometry"]["coordinates"][0]) == 5
+        level2 = [a for a in result.alerts if a.event_type == "convective_level2"][0]
+        assert level2.severity == "severe"
+        assert level2.geometry["type"] == "Polygon"
+        assert len(level2.geometry["coordinates"][0]) == 5
 
-        level3 = [a for a in result["alerts"] if a["event_type"] == "convective_level3"][0]
-        assert level3["severity"] == "extreme"
+        level3 = [a for a in result.alerts if a.event_type == "convective_level3"][0]
+        assert level3.severity == "extreme"
 
 
 class TestIBTrACSClient:
@@ -207,16 +208,16 @@ class TestIBTrACSClient:
         client = IBTrACSClient()
         result = client.fetch_current_alerts()
 
-        assert result["source"] == "ibtracs"
-        assert len(result["alerts"]) == 2
+        assert result.source == "ibtracs"
+        assert len(result.alerts) == 2
 
-        testa = result["alerts"][0]
-        assert testa["event_type"] == "cyclone"
-        assert testa["severity"] == "extreme"
-        assert testa["title"] == "Cyclone TESTA (Cat 3)"
-        assert testa["geometry"]["type"] == "Point"
-        assert testa["properties"]["wind_speed"] == 85
-        assert testa["properties"]["category"] == 3
+        testa = result.alerts[0]
+        assert testa.event_type == "cyclone"
+        assert testa.severity == "extreme"
+        assert testa.title == "Cyclone TESTA (Cat 3)"
+        assert testa.geometry["type"] == "Point"
+        assert testa.properties["wind_speed"] == 85
+        assert testa.properties["category"] == 3
 
 
 class TestPTWCClient:
@@ -249,12 +250,12 @@ class TestPTWCClient:
         client = PTWCClient()
         result = client.fetch_current_alerts()
 
-        assert result["source"] == "ptwc"
-        assert len(result["alerts"]) == 1
-        alert = result["alerts"][0]
-        assert alert["event_type"] == "tsunami"
-        assert alert["severity"] == "extreme"
-        assert alert["geometry"]["type"] == "Polygon"
+        assert result.source == "ptwc"
+        assert len(result.alerts) == 1
+        alert = result.alerts[0]
+        assert alert.event_type == "tsunami"
+        assert alert.severity == "extreme"
+        assert alert.geometry["type"] == "Polygon"
 
 
 class TestSPCClient:
@@ -272,15 +273,15 @@ class TestSPCClient:
         client = SPCClient()
         result = client.fetch_tornado_reports("2026-06-06")
 
-        assert result["source"] == "spc"
-        assert len(result["alerts"]) == 2
+        assert result.source == "spc"
+        assert len(result.alerts) == 2
 
-        ef2 = result["alerts"][0]
-        assert ef2["event_type"] == "tornado_report"
-        assert ef2["severity"] == "severe"
-        assert "EF2" in ef2["title"]
-        assert ef2["geometry"]["type"] == "Point"
-        assert ef2["properties"]["f_scale"] == "EF2"
+        ef2 = result.alerts[0]
+        assert ef2.event_type == "tornado_report"
+        assert ef2.severity == "severe"
+        assert "EF2" in ef2.title
+        assert ef2.geometry["type"] == "Point"
+        assert ef2.properties["f_scale"] == "EF2"
 
 
 class TestMeteoAlarmClient:
@@ -308,125 +309,186 @@ class TestMeteoAlarmClient:
         client = MeteoAlarmClient()
         result = client.fetch_current_alerts("germany")
 
-        assert result["source"] == "meteoalarm"
-        assert len(result["alerts"]) == 1
-        alert = result["alerts"][0]
-        assert alert["event_type"] == "thunderstorm"
-        assert alert["severity"] == "severe"
+        assert result.source == "meteoalarm"
+        assert len(result.alerts) == 1
+        alert = result.alerts[0]
+        assert alert.event_type == "thunderstorm"
+        assert alert.severity == "severe"
 
 
 class TestFetchAlertsOrchestrator:
+    @patch('core.alerts.PTWCClient')
+    @patch('core.alerts.SPCClient')
     @patch('core.alerts.GDACSClient')
     @patch('core.alerts.NWSClient')
     @patch('core.alerts.IBTrACSClient')
-    def test_orchestrator_us_location(self, mock_ibtracs, mock_nws, mock_gdacs):
+    def test_orchestrator_us_location(self, mock_ibtracs, mock_nws, mock_gdacs, mock_spc, mock_ptwc):
         # Mock GDACS
         mock_gdacs_instance = MagicMock()
-        mock_gdacs_instance.fetch_current_alerts.return_value = {
-            "source": "gdacs",
-            "alerts": [{
-                "event_type": "earthquake",
-                "severity": "extreme",
-                "title": "Test EQ",
-                "description": "Test",
-                "geometry": None,
-                "valid_from": "2026-06-06T00:00:00",
-                "valid_to": "2026-06-06T23:59:59",
-                "source_url": "https://example.com",
-                "properties": {}
-            }]
-        }
+        gdacs_result = SourceResult(
+            source="gdacs",
+            alerts=[Alert(
+                source="gdacs",
+                event_type="earthquake",
+                severity="extreme",
+                title="Test EQ",
+                description="Test",
+                geometry={"type": "Point", "coordinates": [-97.5, 35.5]},
+                valid_from="2026-06-06T00:00:00",
+                valid_to="2026-06-06T23:59:59",
+                source_url="https://example.com",
+                properties={}
+            )]
+        )
+        mock_gdacs_instance.fetch_current_alerts.return_value = gdacs_result
+        mock_gdacs_instance.fetch_historical_alerts.return_value = gdacs_result
         mock_gdacs.return_value = mock_gdacs_instance
 
         # Mock NWS
         mock_nws_instance = MagicMock()
-        mock_nws_instance.fetch_current_alerts.return_value = {
-            "source": "nws",
-            "alerts": [{
-                "event_type": "tornado_warning",
-                "severity": "extreme",
-                "title": "Tornado Warning",
-                "description": "Test",
-                "geometry": None,
-                "valid_from": "2026-06-06T14:00:00",
-                "valid_to": "2026-06-06T14:30:00",
-                "source_url": "https://example.com",
-                "properties": {}
-            }]
-        }
+        mock_nws_instance.fetch_current_alerts.return_value = SourceResult(
+            source="nws",
+            alerts=[Alert(
+                source="nws",
+                event_type="tornado_warning",
+                severity="extreme",
+                title="Tornado Warning",
+                description="Test",
+                geometry={"type": "Point", "coordinates": [-97.5, 35.5]},
+                valid_from="2026-06-06T14:00:00",
+                valid_to="2026-06-06T14:30:00",
+                source_url="https://example.com",
+                properties={}
+            )]
+        )
         mock_nws.return_value = mock_nws_instance
 
         # Mock IBTrACS
         mock_ibtracs_instance = MagicMock()
-        mock_ibtracs_instance.fetch_current_alerts.return_value = {
-            "source": "ibtracs",
-            "alerts": []
-        }
+        ibtracs_result = SourceResult(source="ibtracs", alerts=[])
+        mock_ibtracs_instance.fetch_current_alerts.return_value = ibtracs_result
+        mock_ibtracs_instance.fetch_historical_alerts.return_value = ibtracs_result
         mock_ibtracs.return_value = mock_ibtracs_instance
+
+        # Mock PTWC
+        mock_ptwc_instance = MagicMock()
+        mock_ptwc_instance.fetch_current_alerts.return_value = SourceResult(
+            source="ptwc",
+            alerts=[]
+        )
+        mock_ptwc.return_value = mock_ptwc_instance
+
+        # Mock SPC
+        mock_spc_instance = MagicMock()
+        mock_spc_instance.fetch_tornado_reports.return_value = SourceResult(
+            source="spc",
+            alerts=[]
+        )
+        mock_spc.return_value = mock_spc_instance
 
         # Test US location (Oklahoma)
         alerts = fetch_alerts(35.5, -97.5, "2026-06-06T14:00:00")
 
         # Should have alerts from GDACS and NWS
         assert len(alerts) >= 2
-        sources = {a["source"] for a in alerts}
+        sources = {a.source for a in alerts}
         assert "gdacs" in sources
         assert "nws" in sources
 
+    @patch('core.alerts.PTWCClient')
+    @patch('core.alerts.IBTrACSClient')
+    @patch('core.alerts.MeteoAlarmClient')
     @patch('core.alerts.GDACSClient')
     @patch('core.alerts.ESTOFEXClient')
-    def test_orchestrator_europe_location(self, mock_estofex, mock_gdacs):
+    def test_orchestrator_europe_location(self, mock_estofex, mock_gdacs, mock_meteoalarm, mock_ibtracs, mock_ptwc):
         # Mock GDACS
         mock_gdacs_instance = MagicMock()
-        mock_gdacs_instance.fetch_current_alerts.return_value = {
-            "source": "gdacs",
-            "alerts": []
-        }
+        gdacs_result = SourceResult(source="gdacs", alerts=[])
+        mock_gdacs_instance.fetch_current_alerts.return_value = gdacs_result
+        mock_gdacs_instance.fetch_historical_alerts.return_value = gdacs_result
         mock_gdacs.return_value = mock_gdacs_instance
 
         # Mock ESTOFEX
         mock_estofex_instance = MagicMock()
-        mock_estofex_instance.fetch_current_alerts.return_value = {
-            "source": "estofex",
-            "alerts": [{
-                "event_type": "convective_level2",
-                "severity": "severe",
-                "title": "Convective Outlook Level 2",
-                "description": "Test",
-                "geometry": None,
-                "valid_from": "2026-06-06T00:00:00",
-                "valid_to": "2026-06-07T00:00:00",
-                "source_url": "https://example.com",
-                "properties": {}
-            }]
-        }
+        mock_estofex_instance.fetch_current_alerts.return_value = SourceResult(
+            source="estofex",
+            alerts=[Alert(
+                source="estofex",
+                event_type="convective_level2",
+                severity="severe",
+                title="Convective Outlook Level 2",
+                description="Test",
+                geometry={"type": "Point", "coordinates": [10.0, 50.0]},
+                valid_from="2026-06-06T00:00:00",
+                valid_to="2026-06-07T00:00:00",
+                source_url="https://example.com",
+                properties={}
+            )]
+        )
         mock_estofex.return_value = mock_estofex_instance
+
+        # Mock MeteoAlarm
+        mock_meteoalarm_instance = MagicMock()
+        mock_meteoalarm_instance.fetch_current_alerts.return_value = SourceResult(
+            source="meteoalarm",
+            alerts=[]
+        )
+        mock_meteoalarm.return_value = mock_meteoalarm_instance
+
+        # Mock IBTrACS
+        mock_ibtracs_instance = MagicMock()
+        ibtracs_result = SourceResult(source="ibtracs", alerts=[])
+        mock_ibtracs_instance.fetch_current_alerts.return_value = ibtracs_result
+        mock_ibtracs_instance.fetch_historical_alerts.return_value = ibtracs_result
+        mock_ibtracs.return_value = mock_ibtracs_instance
+
+        # Mock PTWC
+        mock_ptwc_instance = MagicMock()
+        ptwc_result = SourceResult(source="ptwc", alerts=[])
+        mock_ptwc_instance.fetch_current_alerts.return_value = ptwc_result
+        mock_ptwc.return_value = mock_ptwc_instance
 
         # Test Europe location (Germany)
         alerts = fetch_alerts(50.0, 10.0, "2026-06-06T12:00:00")
 
-        sources = {a["source"] for a in alerts}
+        sources = {a.source for a in alerts}
         assert "estofex" in sources
 
     def test_orchestrator_severity_sorting(self):
-        with patch('core.alerts.GDACSClient') as mock_gdacs:
+        with patch('core.alerts.PTWCClient') as mock_ptwc, \
+             patch('core.alerts.IBTrACSClient') as mock_ibtracs, \
+             patch('core.alerts.GDACSClient') as mock_gdacs:
             mock_gdacs_instance = MagicMock()
-            mock_gdacs_instance.fetch_current_alerts.return_value = {
-                "source": "gdacs",
-                "alerts": [
-                    {"severity": "moderate", "event_type": "test1", "title": "A", "description": "",
-                     "geometry": None, "valid_from": "", "valid_to": "", "source_url": "", "properties": {}},
-                    {"severity": "extreme", "event_type": "test2", "title": "B", "description": "",
-                     "geometry": None, "valid_from": "", "valid_to": "", "source_url": "", "properties": {}},
-                    {"severity": "severe", "event_type": "test3", "title": "C", "description": "",
-                     "geometry": None, "valid_from": "", "valid_to": "", "source_url": "", "properties": {}},
+            gdacs_result = SourceResult(
+                source="gdacs",
+                alerts=[
+                    Alert(source="gdacs", severity="moderate", event_type="test1", title="A", description="",
+                          geometry={"type": "Point", "coordinates": [0, 0]}, valid_from="", valid_to="", source_url="", properties={}),
+                    Alert(source="gdacs", severity="extreme", event_type="test2", title="B", description="",
+                          geometry={"type": "Point", "coordinates": [0, 0]}, valid_from="", valid_to="", source_url="", properties={}),
+                    Alert(source="gdacs", severity="severe", event_type="test3", title="C", description="",
+                          geometry={"type": "Point", "coordinates": [0, 0]}, valid_from="", valid_to="", source_url="", properties={}),
                 ]
-            }
+            )
+            mock_gdacs_instance.fetch_current_alerts.return_value = gdacs_result
+            mock_gdacs_instance.fetch_historical_alerts.return_value = gdacs_result
             mock_gdacs.return_value = mock_gdacs_instance
+
+            # Mock other global clients
+            mock_ibtracs_instance = MagicMock()
+            ibtracs_result = SourceResult(source="ibtracs", alerts=[])
+            mock_ibtracs_instance.fetch_current_alerts.return_value = ibtracs_result
+            mock_ibtracs_instance.fetch_historical_alerts.return_value = ibtracs_result
+            mock_ibtracs.return_value = mock_ibtracs_instance
+
+            mock_ptwc_instance = MagicMock()
+            ptwc_result = SourceResult(source="ptwc", alerts=[])
+            mock_ptwc_instance.fetch_current_alerts.return_value = ptwc_result
+            mock_ptwc.return_value = mock_ptwc_instance
 
             alerts = fetch_alerts(0, 0, "2026-06-06T00:00:00", sources=["gdacs"])
 
             # Should be sorted by severity (extreme, severe, moderate)
-            assert alerts[0]["severity"] == "extreme"
-            assert alerts[1]["severity"] == "severe"
-            assert alerts[2]["severity"] == "moderate"
+            assert alerts[0].severity == "extreme"
+            assert alerts[1].severity == "severe"
+            assert alerts[2].severity == "moderate"

@@ -58,19 +58,18 @@ class TestPressureLevelClientParse:
         client = PressureLevelClient()
         raw = self._make_mock_response()
         result = client._parse_response(raw, synoptic_hour=0)
-        assert result["source"] == "open-meteo-pressure"
-        assert result["synoptic_time"] == "2026-07-02T00:00"
-        assert len(result["temperature"]) == len(PRESSURE_LEVELS)
-        assert len(result["pressure_levels"]) == len(PRESSURE_LEVELS)
-        assert result["timestamps"] is None
+        assert result.source == "open-meteo-pressure"
+        assert result.synoptic_time == "2026-07-02T00:00"
+        assert len(result.temperature) == len(PRESSURE_LEVELS)
+        assert len(result.pressure_levels) == len(PRESSURE_LEVELS)
 
     def test_parse_hourly(self):
         client = PressureLevelClient()
         raw = self._make_mock_response()
         result = client._parse_response(raw, synoptic_hour=None)
-        assert len(result["timestamps"]) == 2
-        assert len(result["temperature"]) == 2
-        assert len(result["temperature"][0]) == len(PRESSURE_LEVELS)
+        assert len(result.timestamps) == 2
+        assert len(result.temperature) == 2
+        assert len(result.temperature[0]) == len(PRESSURE_LEVELS)
 
 
 class TestPressureLevelClientFetch:
@@ -91,5 +90,5 @@ class TestPressureLevelClientFetch:
 
         client = PressureLevelClient()
         result = client.fetch_snapshot(45.0, -90.0, "2026-07-02", 12)
-        assert result["source"] == "open-meteo-pressure"
-        assert result["synoptic_time"] == "2026-07-02T12:00"
+        assert result.source == "open-meteo-pressure"
+        assert result.synoptic_time == "2026-07-02T12:00"

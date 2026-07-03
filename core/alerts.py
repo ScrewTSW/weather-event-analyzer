@@ -16,6 +16,8 @@ from xml.etree import ElementTree as ET
 
 import requests
 
+from core.models.alerts.base import Alert, SourceResult
+
 USER_AGENT = "WeatherEventAnalyzer/1.0"
 RATE_LIMIT_DELAY = 0.3  # 300ms between requests to any single source
 
@@ -32,7 +34,7 @@ class GDACSClient:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
 
-    def fetch_current_alerts(self) -> dict:
+    def fetch_current_alerts(self) -> SourceResult:
         """Fetch current active alerts (last 48 hours only)."""
         try:
             from datetime import UTC
@@ -45,7 +47,7 @@ class GDACSClient:
             to_date.strftime("%Y-%m-%d")
         )
 
-    def fetch_historical_alerts(self, from_date: str, to_date: str) -> dict:
+    def fetch_historical_alerts(self, from_date: str, to_date: str) -> SourceResult:
         """Fetch alerts active between from_date and to_date (ISO format: YYYY-MM-DD)."""
         url = f"{self.BASE_URL}/Events/geteventlist/search"
         params = {
@@ -68,13 +70,13 @@ class GDACSClient:
                     if alert:
                         alerts.append(alert)
 
-            return {"source": "gdacs", "alerts": alerts}
+            return SourceResult(source="gdacs", alerts=alerts)
 
         except requests.RequestException as e:
             logger.warning(f"GDACS fetch failed: {e}")
-            return {"source": "gdacs", "alerts": []}
+            return SourceResult(source="gdacs", alerts=[])
 
-    def _parse_feature(self, feature: dict) -> Optional[dict]:
+    def _parse_feature(self, feature: dict) -> Optional[Alert]:
         """Parse a GDACS GeoJSON feature into standard alert format."""
         props = feature.get("properties", {})
 
@@ -102,16 +104,17 @@ class GDACSClient:
 
         title = props.get("name") or props.get("eventname") or f"{event_type.title()} in {props.get('country', 'Unknown')}"
 
-        return {
-            "event_type": event_type,
-            "severity": severity,
-            "title": title,
-            "description": props.get("description", ""),
-            "geometry": geo,
-            "valid_from": props.get("fromdate", ""),
-            "valid_to": props.get("todate", ""),
-            "source_url": props.get("url", {}).get("report", "") if isinstance(props.get("url"), dict) else "",
-            "properties": {
+        return Alert(
+            source="gdacs",
+            event_type=event_type,
+            severity=severity,
+            title=title,
+            description=props.get("description", ""),
+            geometry=geo,
+            valid_from=props.get("fromdate", ""),
+            valid_to=props.get("todate", ""),
+            source_url=props.get("url", {}).get("report", "") if isinstance(props.get("url"), dict) else "",
+            properties={
                 "event_id": props.get("eventid"),
                 "episode_id": props.get("episodeid"),
                 "country": props.get("country", ""),
@@ -122,7 +125,7 @@ class GDACSClient:
                 "lat": coords[1] if len(coords) > 1 else None,
                 "lon": coords[0] if len(coords) > 0 else None,
             }
-        }
+        )
 
 
 class NWSClient:
@@ -134,7 +137,7 @@ class NWSClient:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
 
-    def fetch_current_alerts(self) -> dict:
+    def fetch_current_alerts(self) -> SourceResult:
         """Fetch current active alerts with Extreme or Severe severity."""
         url = f"{self.BASE_URL}/active"
         params = {"severity": "Extreme,Severe"}
@@ -152,13 +155,13 @@ class NWSClient:
                     if alert:
                         alerts.append(alert)
 
-            return {"source": "nws", "alerts": alerts}
+            return SourceResult(source="nws", alerts=alerts)
 
         except requests.RequestException as e:
             logger.warning(f"NWS fetch failed: {e}")
-            return {"source": "nws", "alerts": []}
+            return SourceResult(source="nws", alerts=[])
 
-    def _parse_feature(self, feature: dict) -> Optional[dict]:
+    def _parse_feature(self, feature: dict) -> Optional[Alert]:
         """Parse a NWS alert feature into standard format."""
         props = feature.get("properties", {})
 
@@ -175,21 +178,22 @@ class NWSClient:
         }
         severity = severity_map.get(props.get("severity", "Moderate"), "moderate")
 
-        return {
-            "event_type": event_type,
-            "severity": severity,
-            "title": props.get("headline", event),
-            "description": props.get("description", ""),
-            "geometry": feature.get("geometry"),
-            "valid_from": props.get("onset", ""),
-            "valid_to": props.get("expires", ""),
-            "source_url": f"https://api.weather.gov/alerts/{props.get('id', '')}",
-            "properties": {
+        return Alert(
+            source="nws",
+            event_type=event_type,
+            severity=severity,
+            title=props.get("headline", event),
+            description=props.get("description", ""),
+            geometry=feature.get("geometry"),
+            valid_from=props.get("onset", ""),
+            valid_to=props.get("expires", ""),
+            source_url=f"https://api.weather.gov/alerts/{props.get('id', '')}",
+            properties={
                 "urgency": props.get("urgency"),
                 "certainty": props.get("certainty"),
                 "parameters": props.get("parameters", {}),
             }
-        }
+        )
 
 
 class ESTOFEXClient:
@@ -201,7 +205,7 @@ class ESTOFEXClient:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
 
-    def fetch_current_alerts(self) -> dict:
+    def fetch_current_alerts(self) -> SourceResult:
         """Fetch current convective forecast."""
         url = self.BASE_URL
         params = {"xml": "yes"}
@@ -212,13 +216,13 @@ class ESTOFEXClient:
             resp.raise_for_status()
 
             alerts = self._parse_xml(resp.content)
-            return {"source": "estofex", "alerts": alerts}
+            return SourceResult(source="estofex", alerts=alerts)
 
         except requests.RequestException as e:
             logger.warning(f"ESTOFEX fetch failed: {e}")
-            return {"source": "estofex", "alerts": []}
+            return SourceResult(source="estofex", alerts=[])
 
-    def _parse_xml(self, xml_content: bytes) -> list[dict]:
+    def _parse_xml(self, xml_content: bytes) -> list[Alert]:
         """Parse ESTOFEX XML forecast."""
         try:
             root = ET.fromstring(xml_content)
@@ -257,17 +261,18 @@ class ESTOFEXClient:
                     "coordinates": [points]
                 }
 
-                alerts.append({
-                    "event_type": event_type,
-                    "severity": severity,
-                    "title": f"Convective Outlook {risk_type.title()}",
-                    "description": f"ESTOFEX convective forecast {risk_type}",
-                    "geometry": geometry,
-                    "valid_from": valid_from,
-                    "valid_to": valid_to,
-                    "source_url": self.BASE_URL,
-                    "properties": {"risk_type": risk_type}
-                })
+                alerts.append(Alert(
+                    source="estofex",
+                    event_type=event_type,
+                    severity=severity,
+                    title=f"Convective Outlook {risk_type.title()}",
+                    description=f"ESTOFEX convective forecast {risk_type}",
+                    geometry=geometry,
+                    valid_from=valid_from,
+                    valid_to=valid_to,
+                    source_url=self.BASE_URL,
+                    properties={"risk_type": risk_type}
+                ))
 
         return alerts
 
@@ -282,17 +287,17 @@ class IBTrACSClient:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
 
-    def fetch_current_alerts(self) -> dict:
+    def fetch_current_alerts(self) -> SourceResult:
         """Fetch currently active cyclones."""
         return self._fetch_from_url(self.ACTIVE_URL)
 
-    def fetch_historical_alerts(self, from_date: str, to_date: str) -> dict:
+    def fetch_historical_alerts(self, from_date: str, to_date: str) -> SourceResult:
         """Fetch historical cyclones (last 3 years)."""
         # IBTrACS historical endpoint provides last 3 years
         # We filter by date after fetching
         return self._fetch_from_url(self.HISTORICAL_URL, from_date, to_date)
 
-    def _fetch_from_url(self, url: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> dict:
+    def _fetch_from_url(self, url: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> SourceResult:
         """Fetch and parse IBTrACS CSV data."""
         try:
             time.sleep(RATE_LIMIT_DELAY)
@@ -300,13 +305,13 @@ class IBTrACSClient:
             resp.raise_for_status()
 
             alerts = self._parse_csv(resp.text, from_date, to_date)
-            return {"source": "ibtracs", "alerts": alerts}
+            return SourceResult(source="ibtracs", alerts=alerts)
 
         except requests.RequestException as e:
             logger.warning(f"IBTrACS fetch failed: {e}")
-            return {"source": "ibtracs", "alerts": []}
+            return SourceResult(source="ibtracs", alerts=[])
 
-    def _parse_csv(self, csv_text: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list[dict]:
+    def _parse_csv(self, csv_text: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> list[Alert]:
         """Parse IBTrACS CSV data."""
         alerts = []
         reader = csv.DictReader(io.StringIO(csv_text))
@@ -342,22 +347,23 @@ class IBTrACSClient:
                     "coordinates": [lon, lat]
                 }
 
-                alerts.append({
-                    "event_type": "cyclone",
-                    "severity": severity,
-                    "title": title,
-                    "description": f"Tropical cyclone {name}",
-                    "geometry": geometry,
-                    "valid_from": iso_time,
-                    "valid_to": iso_time,  # Point in time
-                    "source_url": "https://www.ncei.noaa.gov/products/international-best-track-archive",
-                    "properties": {
+                alerts.append(Alert(
+                    source="ibtracs",
+                    event_type="cyclone",
+                    severity=severity,
+                    title=title,
+                    description=f"Tropical cyclone {name}",
+                    geometry=geometry,
+                    valid_from=iso_time,
+                    valid_to=iso_time,  # Point in time
+                    source_url="https://www.ncei.noaa.gov/products/international-best-track-archive",
+                    properties={
                         "sid": row.get("SID"),
                         "wind_speed": wind_speed,
                         "pressure": pressure,
                         "category": category,
                     }
-                })
+                ))
 
             except (ValueError, KeyError) as e:
                 logger.debug(f"Skipping IBTrACS row: {e}")
@@ -375,7 +381,7 @@ class PTWCClient:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
 
-    def fetch_current_alerts(self) -> dict:
+    def fetch_current_alerts(self) -> SourceResult:
         """Fetch current tsunami alerts from PTWC CAP feed."""
         try:
             time.sleep(RATE_LIMIT_DELAY)
@@ -383,13 +389,13 @@ class PTWCClient:
             resp.raise_for_status()
 
             alerts = self._parse_cap_xml(resp.content)
-            return {"source": "ptwc", "alerts": alerts}
+            return SourceResult(source="ptwc", alerts=alerts)
 
         except requests.RequestException as e:
             logger.warning(f"PTWC fetch failed: {e}")
-            return {"source": "ptwc", "alerts": []}
+            return SourceResult(source="ptwc", alerts=[])
 
-    def _parse_cap_xml(self, xml_content: bytes) -> list[dict]:
+    def _parse_cap_xml(self, xml_content: bytes) -> list[Alert]:
         """Parse CAP 1.2 XML format."""
         try:
             root = ET.fromstring(xml_content)
@@ -442,20 +448,21 @@ class PTWCClient:
             }
             severity = severity_map.get(severity, "moderate")
 
-            alerts.append({
-                "event_type": "tsunami",
-                "severity": severity,
-                "title": headline,
-                "description": description,
-                "geometry": geometry,
-                "valid_from": effective,
-                "valid_to": expires,
-                "source_url": self.CAP_URL,
-                "properties": {
+            alerts.append(Alert(
+                source="ptwc",
+                event_type="tsunami",
+                severity=severity,
+                title=headline,
+                description=description,
+                geometry=geometry,
+                valid_from=effective,
+                valid_to=expires,
+                source_url=self.CAP_URL,
+                properties={
                     "urgency": self._get_text(info, "urgency", ns),
                     "certainty": self._get_text(info, "certainty", ns),
                 }
-            })
+            ))
 
         return alerts
 
@@ -497,22 +504,22 @@ class SPCClient:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
 
-    def fetch_tornado_reports(self, date: str) -> dict:
+    def fetch_tornado_reports(self, date: str) -> SourceResult:
         """Fetch tornado reports for a specific date (YYYY-MM-DD or 'today')."""
         date_str = self._format_date(date)
         return self._fetch_reports(self.TORNADO_REPORTS_URL.format(date=date_str), "tornado_report")
 
-    def fetch_wind_reports(self, date: str) -> dict:
+    def fetch_wind_reports(self, date: str) -> SourceResult:
         """Fetch wind reports for a specific date."""
         date_str = self._format_date(date)
         return self._fetch_reports(self.WIND_REPORTS_URL.format(date=date_str), "wind_report")
 
-    def fetch_hail_reports(self, date: str) -> dict:
+    def fetch_hail_reports(self, date: str) -> SourceResult:
         """Fetch hail reports for a specific date."""
         date_str = self._format_date(date)
         return self._fetch_reports(self.HAIL_REPORTS_URL.format(date=date_str), "hail_report")
 
-    def fetch_current_alerts(self) -> dict:
+    def fetch_current_alerts(self) -> SourceResult:
         """Fetch today's tornado reports (most severe)."""
         return self.fetch_tornado_reports("today")
 
@@ -527,7 +534,7 @@ class SPCClient:
         except ValueError:
             return date  # Return as-is if not in expected format
 
-    def _fetch_reports(self, url: str, event_type: str) -> dict:
+    def _fetch_reports(self, url: str, event_type: str) -> SourceResult:
         """Fetch and parse SPC storm reports CSV."""
         try:
             time.sleep(RATE_LIMIT_DELAY)
@@ -535,13 +542,13 @@ class SPCClient:
             resp.raise_for_status()
 
             alerts = self._parse_csv(resp.text, event_type, url)
-            return {"source": "spc", "alerts": alerts}
+            return SourceResult(source="spc", alerts=alerts)
 
         except requests.RequestException as e:
             logger.warning(f"SPC fetch failed: {e}")
-            return {"source": "spc", "alerts": []}
+            return SourceResult(source="spc", alerts=[])
 
-    def _parse_csv(self, csv_text: str, event_type: str, source_url: str) -> list[dict]:
+    def _parse_csv(self, csv_text: str, event_type: str, source_url: str) -> list[Alert]:
         """Parse SPC storm reports CSV."""
         alerts = []
         reader = csv.DictReader(io.StringIO(csv_text))
@@ -578,21 +585,22 @@ class SPCClient:
                     "coordinates": [lon, lat]
                 }
 
-                alerts.append({
-                    "event_type": event_type,
-                    "severity": severity,
-                    "title": title,
-                    "description": comments,
-                    "geometry": geometry,
-                    "valid_from": time_str,
-                    "valid_to": time_str,
-                    "source_url": source_url,
-                    "properties": {
+                alerts.append(Alert(
+                    source="spc",
+                    event_type=event_type,
+                    severity=severity,
+                    title=title,
+                    description=comments,
+                    geometry=geometry,
+                    valid_from=time_str,
+                    valid_to=time_str,
+                    source_url=source_url,
+                    properties={
                         **properties,
                         "county": county,
                         "state": state,
                     }
-                })
+                ))
 
             except (ValueError, KeyError) as e:
                 logger.debug(f"Skipping SPC row: {e}")
@@ -610,7 +618,7 @@ class MeteoAlarmClient:
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
 
-    def fetch_current_alerts(self, country: str = "germany") -> dict:
+    def fetch_current_alerts(self, country: str = "germany") -> SourceResult:
         """Fetch current alerts for a specific European country."""
         url = self.FEED_URL.format(country=country.lower())
 
@@ -620,13 +628,13 @@ class MeteoAlarmClient:
             resp.raise_for_status()
 
             alerts = self._parse_atom_cap(resp.content)
-            return {"source": "meteoalarm", "alerts": alerts}
+            return SourceResult(source="meteoalarm", alerts=alerts)
 
         except requests.RequestException as e:
             logger.warning(f"MeteoAlarm fetch failed: {e}")
-            return {"source": "meteoalarm", "alerts": []}
+            return SourceResult(source="meteoalarm", alerts=[])
 
-    def _parse_atom_cap(self, xml_content: bytes) -> list[dict]:
+    def _parse_atom_cap(self, xml_content: bytes) -> list[Alert]:
         """Parse Atom+CAP XML feed."""
         try:
             root = ET.fromstring(xml_content)
@@ -666,17 +674,18 @@ class MeteoAlarmClient:
             # Normalize event type
             event_type = event.lower().replace(" ", "_")
 
-            alerts.append({
-                "event_type": event_type,
-                "severity": severity,
-                "title": title or event,
-                "description": "",
-                "geometry": geometry,
-                "valid_from": effective,
-                "valid_to": expires,
-                "source_url": self.FEED_URL.format(country=""),
-                "properties": {}
-            })
+            alerts.append(Alert(
+                source="meteoalarm",
+                event_type=event_type,
+                severity=severity,
+                title=title or event,
+                description="",
+                geometry=geometry,
+                valid_from=effective,
+                valid_to=expires,
+                source_url=self.FEED_URL.format(country=""),
+                properties={}
+            ))
 
         return alerts
 
@@ -762,7 +771,7 @@ def detect_country(lat: float, lon: float) -> Optional[str]:
     return "germany"  # Default fallback
 
 
-def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[list[str]] = None) -> list[dict]:
+def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[list[str]] = None) -> list[Alert]:
     """
     Fetch alerts from multiple sources based on location and time.
 
@@ -845,9 +854,9 @@ def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[li
 
             # Add source field to each alert
             if result:
-                for alert in result["alerts"]:
-                    alert["source"] = result["source"]
-                all_alerts.extend(result["alerts"])
+                for alert in result.alerts:
+                    alert.source = result.source
+                all_alerts.extend(result.alerts)
 
         except Exception as e:
             logger.warning(f"Failed to fetch from {source}: {e}")
@@ -856,10 +865,10 @@ def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[li
     # Filter by proximity — only show alerts within relevant distance
     import math
     def _alert_distance(alert, target_lat, target_lon):
-        geo = alert.get("geometry") or {}
+        geo = alert.geometry or {}
         coords = geo.get("coordinates")
         if not coords or len(coords) < 2:
-            props = alert.get("properties", {})
+            props = alert.properties
             a_lat, a_lon = props.get("lat"), props.get("lon")
             if a_lat is None or a_lon is None:
                 return float("inf")
@@ -880,19 +889,19 @@ def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[li
     filtered = []
     for alert in all_alerts:
         dist = _alert_distance(alert, lat, lon)
-        event_type = alert.get("event_type", "")
+        event_type = alert.event_type
         max_dist = max_distance.get(event_type, 20)
         # Extreme/severe alerts visible from further away
-        if alert.get("severity") == "extreme":
+        if alert.severity == "extreme":
             max_dist *= 3
-        elif alert.get("severity") == "severe":
+        elif alert.severity == "severe":
             max_dist *= 2
         if dist <= max_dist:
-            alert["properties"]["distance_deg"] = round(dist, 1)
+            alert.properties["distance_deg"] = round(dist, 1)
             filtered.append(alert)
 
     severity_order = {"extreme": 0, "severe": 1, "moderate": 2, "minor": 3}
-    filtered.sort(key=lambda a: severity_order.get(a["severity"], 4))
+    filtered.sort(key=lambda a: severity_order.get(a.severity, 4))
 
     return filtered
 
@@ -904,7 +913,7 @@ class AlertPoller:
         self,
         lat: float,
         lon: float,
-        on_new_alerts: Callable[[list[dict]], None],
+        on_new_alerts: Callable[[list[Alert]], None],
         interval_seconds: int = 60,
         sources: Optional[list[str]] = None,
     ):
@@ -917,8 +926,8 @@ class AlertPoller:
         self._thread: Optional[threading.Thread] = None
         self._stop_event = threading.Event()
 
-    def _alert_key(self, alert: dict) -> str:
-        return f"{alert.get('source', '')}:{alert.get('event_type', '')}:{alert.get('title', '')}:{alert.get('valid_from', '')}"
+    def _alert_key(self, alert: Alert) -> str:
+        return f"{alert.source}:{alert.event_type}:{alert.title}:{alert.valid_from}"
 
     def _poll_once(self):
         try:

@@ -289,33 +289,31 @@ def add_geo_overlay(img, center_lat, center_lon, bbox_deg=20.0, fronts=None):
 
     if fronts:
         for front in fronts:
-            f_lats = front["lats"]
-            f_lons = front["lons"]
-            if len(f_lats) < 2:
+            if len(front.lats) < 2:
                 continue
-            if front["is_merger"]:
-                ax.plot(f_lons, f_lats, color='magenta', linewidth=4,
+            if front.is_merger:
+                ax.plot(front.lons, front.lats, color='magenta', linewidth=4,
                         transform=map_crs, zorder=8)
-                mid = len(f_lats) // 2
-                ax.plot(f_lons[mid], f_lats[mid], '*', color='magenta',
+                mid = len(front.lats) // 2
+                ax.plot(front.lons[mid], front.lats[mid], '*', color='magenta',
                         markersize=15, transform=map_crs, zorder=9)
-                ax.text(f_lons[mid], f_lats[mid], f' {front["label"]}',
+                ax.text(front.lons[mid], front.lats[mid], f' {front.label}',
                         color='magenta', fontsize=8, fontweight='bold',
                         transform=map_crs, zorder=9)
-            elif front["type"] == "cold":
-                ax.plot(f_lons, f_lats, color='blue', linewidth=2.5,
+            elif front.type == "cold":
+                ax.plot(front.lons, front.lats, color='blue', linewidth=2.5,
                         transform=map_crs, zorder=7)
-                for k in range(0, len(f_lats), max(1, len(f_lats) // 8)):
-                    ax.plot(f_lons[k], f_lats[k], '^', color='blue',
+                for k in range(0, len(front.lats), max(1, len(front.lats) // 8)):
+                    ax.plot(front.lons[k], front.lats[k], '^', color='blue',
                             markersize=6, transform=map_crs, zorder=8)
-            elif front["type"] == "warm":
-                ax.plot(f_lons, f_lats, color='red', linewidth=2.5,
+            elif front.type == "warm":
+                ax.plot(front.lons, front.lats, color='red', linewidth=2.5,
                         transform=map_crs, zorder=7)
-                for k in range(0, len(f_lats), max(1, len(f_lats) // 8)):
-                    ax.plot(f_lons[k], f_lats[k], 'o', color='red',
+                for k in range(0, len(front.lats), max(1, len(front.lats) // 8)):
+                    ax.plot(front.lons[k], front.lats[k], 'o', color='red',
                             markersize=5, transform=map_crs, zorder=8)
-            elif front["type"] == "dry":
-                ax.plot(f_lons, f_lats, color='orange', linewidth=2,
+            elif front.type == "dry":
+                ax.plot(front.lons, front.lats, color='orange', linewidth=2,
                         linestyle='--', transform=map_crs, zorder=7)
 
     buf = io.BytesIO()
@@ -365,11 +363,11 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
     """Create atmospheric data charts.
 
     Args:
-        data: Dict with structure:
+        data: AtmosphereData with structure:
             {
                 "timestamps": ["2026-05-31T07:00", ...],
                 "variables": {
-                    "var_name": {"data": [...], "unit": "..."},
+                    "var_name": VariableTimeSeries(data=[...], unit="..."),
                     ...
                 }
             }
@@ -382,8 +380,8 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
         matplotlib Figure
     """
     plt.style.use("dark_background")
-    timestamps = data["timestamps"]
-    variables = data["variables"]
+    timestamps = data.timestamps
+    variables = data.variables
 
     # Parse timestamps
     try:
@@ -397,14 +395,14 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
     if chart_type == "cape_cin":
         if "cape" not in variables or "cin" not in variables:
             # Compute CAPE/CIN from pressure-level profiles if available
-            if profile_hourly is not None and profile_hourly.get("timestamps"):
+            if profile_hourly is not None and profile_hourly.timestamps:
                 cape_vals = []
                 cin_vals = []
-                p_lvl = np.array(profile_hourly["pressure_levels"], dtype=float) * units.hPa
-                for t_idx in range(len(profile_hourly["timestamps"])):
+                p_lvl = np.array(profile_hourly.pressure_levels, dtype=float) * units.hPa
+                for t_idx in range(len(profile_hourly.timestamps)):
                     try:
-                        t_prof = np.array(profile_hourly["temperature"][t_idx], dtype=float) * units.degC
-                        td_prof = np.array(profile_hourly["dewpoint"][t_idx], dtype=float) * units.degC
+                        t_prof = np.array(profile_hourly.temperature[t_idx], dtype=float) * units.degC
+                        td_prof = np.array(profile_hourly.dewpoint[t_idx], dtype=float) * units.degC
                         sb_cape, sb_cin = mpcalc.surface_based_cape_cin(p_lvl, t_prof, td_prof)
                         cape_vals.append(float(sb_cape.magnitude))
                         cin_vals.append(float(sb_cin.magnitude))
@@ -414,13 +412,14 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
                 cape_data = np.array(cape_vals)
                 cin_data = np.array(cin_vals)
                 time_objects = []
-                for ts in profile_hourly["timestamps"]:
+                for ts in profile_hourly.timestamps:
                     try:
                         time_objects.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
                     except Exception:
                         time_objects.append(ts)
-                variables["cape"] = {"data": cape_vals, "unit": "J/kg"}
-                variables["cin"] = {"data": cin_vals, "unit": "J/kg"}
+                from core.models.atmosphere.base import VariableTimeSeries
+                variables["cape"] = VariableTimeSeries(data=cape_vals, unit="J/kg")
+                variables["cin"] = VariableTimeSeries(data=cin_vals, unit="J/kg")
             else:
                 ax1.text(0.5, 0.5, 'CAPE/CIN not available\n(archive data, no profile)',
                          transform=ax1.transAxes, ha='center', va='center',
@@ -429,8 +428,8 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
                 plt.tight_layout()
                 return fig
         else:
-            cape_data = np.array(variables["cape"]["data"])
-            cin_data = np.array(variables["cin"]["data"])
+            cape_data = np.array(variables["cape"].data)
+            cin_data = np.array(variables["cin"].data)
 
         # Replace None with NaN
         cape_data = np.where(cape_data == None, np.nan, cape_data)
@@ -440,25 +439,25 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
         ax1.fill_between(time_objects, 0, cape_data, alpha=0.3, color='red', label='CAPE')
         ax1.plot(time_objects, cape_data, color='red', linewidth=2)
         ax1.set_xlabel('Time')
-        ax1.set_ylabel(f'CAPE ({variables["cape"]["unit"]})', color='red')
+        ax1.set_ylabel(f'CAPE ({variables["cape"].unit})', color='red')
         ax1.tick_params(axis='y', labelcolor='red')
         ax1.grid(True, alpha=0.3)
 
         # Secondary axis: CIN
         ax2 = ax1.twinx()
         ax2.plot(time_objects, cin_data, color='cyan', linewidth=2, label='CIN')
-        ax2.set_ylabel(f'CIN ({variables["cin"]["unit"]})', color='cyan')
+        ax2.set_ylabel(f'CIN ({variables["cin"].unit})', color='cyan')
         ax2.tick_params(axis='y', labelcolor='cyan')
 
         if profile_hourly is not None:
             try:
                 srh_3km = []
                 srh_1km = []
-                p_levels = np.array(profile_hourly["pressure_levels"], dtype=float) * units.hPa
-                for t_idx in range(len(profile_hourly["timestamps"])):
-                    ws = np.array(profile_hourly["wind_speed"][t_idx], dtype=float) * units('m/s')
-                    wd = np.array(profile_hourly["wind_direction"][t_idx], dtype=float) * units.degrees
-                    ht = np.array(profile_hourly["geopotential_height"][t_idx], dtype=float) * units.meter
+                p_levels = np.array(profile_hourly.pressure_levels, dtype=float) * units.hPa
+                for t_idx in range(len(profile_hourly.timestamps)):
+                    ws = np.array(profile_hourly.wind_speed[t_idx], dtype=float) * units('m/s')
+                    wd = np.array(profile_hourly.wind_direction[t_idx], dtype=float) * units.degrees
+                    ht = np.array(profile_hourly.geopotential_height[t_idx], dtype=float) * units.meter
                     u_t, v_t = mpcalc.wind_components(ws, wd)
                     try:
                         pos3, neg3, total3 = mpcalc.storm_relative_helicity(
@@ -474,7 +473,7 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
                         srh_1km.append(np.nan)
 
                 srh_times = []
-                for ts in profile_hourly["timestamps"]:
+                for ts in profile_hourly.timestamps:
                     try:
                         srh_times.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
                     except Exception:
@@ -495,8 +494,8 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
 
     elif chart_type == "temp_dewpoint":
         # Temperature (red) + Dewpoint (green) lines with spread fill
-        temp_data = np.array(variables["temperature"]["data"])
-        dewpoint_data = np.array(variables["dewpoint"]["data"])
+        temp_data = np.array(variables["temperature"].data)
+        dewpoint_data = np.array(variables["dewpoint"].data)
 
         # Replace None with NaN
         temp_data = np.where(temp_data == None, np.nan, temp_data)
@@ -506,15 +505,15 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
         ax1.plot(time_objects, dewpoint_data, color='green', linewidth=2, label='Dewpoint')
         ax1.fill_between(time_objects, temp_data, dewpoint_data, alpha=0.2, color='orange')
         ax1.set_xlabel('Time')
-        ax1.set_ylabel(f'Temperature ({variables["temperature"]["unit"]})')
+        ax1.set_ylabel(f'Temperature ({variables["temperature"].unit})')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         plt.title('Temperature and Dewpoint')
 
     elif chart_type == "wind":
         # Wind speed (blue) + Gusts (red dashed) lines
-        wind_speed_data = np.array(variables["wind_speed"]["data"])
-        wind_gusts_data = np.array(variables["wind_gusts"]["data"])
+        wind_speed_data = np.array(variables["wind_speed"].data)
+        wind_gusts_data = np.array(variables["wind_gusts"].data)
 
         # Replace None with NaN
         wind_speed_data = np.where(wind_speed_data == None, np.nan, wind_speed_data)
@@ -523,7 +522,7 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
         ax1.plot(time_objects, wind_speed_data, color='cyan', linewidth=2, label='Wind Speed')
         ax1.plot(time_objects, wind_gusts_data, color='red', linewidth=2, linestyle='--', label='Wind Gusts')
         ax1.set_xlabel('Time')
-        ax1.set_ylabel(f'Speed ({variables["wind_speed"]["unit"]})')
+        ax1.set_ylabel(f'Speed ({variables["wind_speed"].unit})')
         ax1.legend()
         ax1.grid(True, alpha=0.3)
         plt.title('Wind Speed and Gusts')
@@ -553,11 +552,11 @@ def create_sounding_chart(profile_data):
 
     from scipy.interpolate import PchipInterpolator
 
-    p_raw = np.array(profile_data["pressure_levels"], dtype=float)
-    t_raw = np.array(profile_data["temperature"], dtype=float)
-    td_raw = np.array(profile_data["dewpoint"], dtype=float)
-    ws_raw = np.array(profile_data["wind_speed"], dtype=float)
-    wd_raw = np.array(profile_data["wind_direction"], dtype=float)
+    p_raw = np.array(profile_data.pressure_levels, dtype=float)
+    t_raw = np.array(profile_data.temperature, dtype=float)
+    td_raw = np.array(profile_data.dewpoint, dtype=float)
+    ws_raw = np.array(profile_data.wind_speed, dtype=float)
+    wd_raw = np.array(profile_data.wind_direction, dtype=float)
 
     # Interpolate in log-pressure space; PCHIP preserves monotonicity
     # and avoids overshooting artifacts in dewpoint dry layers
@@ -680,7 +679,7 @@ def create_sounding_chart(profile_data):
                      bbox=dict(boxstyle='round,pad=0.4', facecolor='black', alpha=0.7))
 
     # SFC label with I-beam and height
-    sfc_hgt = profile_data["geopotential_height"][0] if profile_data.get("geopotential_height") else 0
+    sfc_hgt = profile_data.geopotential_height[0] if profile_data.geopotential_height else 0
     sfc_p = pressure[0].magnitude
     skew.ax.axhline(sfc_p, color='white', linewidth=1.5, linestyle='-', alpha=0.5)
     skew.ax.text(1.02, sfc_p,
@@ -713,9 +712,9 @@ def create_sounding_chart(profile_data):
     skew.ax.set_ylim(1050, 100)
     skew.ax.set_xlim(-40, 50)
 
-    synoptic = profile_data.get("synoptic_time", "")
-    lat = profile_data.get("latitude", "")
-    lon = profile_data.get("longitude", "")
+    synoptic = profile_data.synoptic_time or ""
+    lat = profile_data.latitude or ""
+    lon = profile_data.longitude or ""
     skew.ax.set_title(f"Sounding — {synoptic}  ({lat}°, {lon}°)", fontsize=12)
     skew.ax.legend(loc='upper left', fontsize=8)
 
@@ -741,10 +740,10 @@ def create_hodograph_chart(profile_data):
     """
     plt.style.use("dark_background")
 
-    pressure = np.array(profile_data["pressure_levels"], dtype=float) * units.hPa
-    wind_speed = np.array(profile_data["wind_speed"], dtype=float) * units('m/s')
-    wind_dir = np.array(profile_data["wind_direction"], dtype=float) * units.degrees
-    heights = np.array(profile_data["geopotential_height"], dtype=float) * units.meter
+    pressure = np.array(profile_data.pressure_levels, dtype=float) * units.hPa
+    wind_speed = np.array(profile_data.wind_speed, dtype=float) * units('m/s')
+    wind_dir = np.array(profile_data.wind_direction, dtype=float) * units.degrees
+    heights = np.array(profile_data.geopotential_height, dtype=float) * units.meter
 
     u, v = mpcalc.wind_components(wind_speed, wind_dir)
     MS_TO_KT = 1.94384
@@ -813,7 +812,7 @@ def create_hodograph_chart(profile_data):
 
     ax.set_xlabel('u (kt)')
     ax.set_ylabel('v (kt)')
-    synoptic = profile_data.get("synoptic_time", "")
+    synoptic = profile_data.synoptic_time or ""
     ax.set_title(f"Hodograph — {synoptic}", fontsize=12)
     ax.legend(loc='upper right', fontsize=6, ncol=2)
 

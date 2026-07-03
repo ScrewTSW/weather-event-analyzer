@@ -4,6 +4,8 @@ import numpy as np
 import requests
 from scipy.ndimage import gaussian_filter
 
+from core.models import FrontalFeature
+
 
 def compute_tfp(temp, lats, lons):
     dlat = np.abs(lats[1] - lats[0]) if len(lats) > 1 else 1.0
@@ -103,8 +105,8 @@ def detect_cold_fronts(temp, u, v, lats, lons):
     segments = _find_ridge_with_wind_shift(
         tfp, u, v, lats, lons,
         threshold_pct=80, min_absolute=MIN_TFP, min_wind_shift=30)
-    return [{"type": "cold", "lats": s[0], "lons": s[1],
-             "is_merger": False, "label": ""} for s in segments]
+    return [FrontalFeature(type="cold", lats=s[0], lons=s[1],
+             is_merger=False, label="") for s in segments]
 
 
 def detect_warm_fronts(temp, u, v, lats, lons):
@@ -113,8 +115,8 @@ def detect_warm_fronts(temp, u, v, lats, lons):
     segments = _find_ridge_with_wind_shift(
         neg_tfp, u, v, lats, lons,
         threshold_pct=80, min_absolute=MIN_TFP, min_wind_shift=20)
-    return [{"type": "warm", "lats": s[0], "lons": s[1],
-             "is_merger": False, "label": ""} for s in segments]
+    return [FrontalFeature(type="warm", lats=s[0], lons=s[1],
+             is_merger=False, label="") for s in segments]
 
 
 def detect_dry_lines(dewpoint, temp, lats, lons):
@@ -137,8 +139,8 @@ def detect_dry_lines(dewpoint, temp, lats, lons):
     segments = _find_ridge_with_wind_shift(
         dry_field, dew_u, dew_v, lats, lons,
         threshold_pct=80, min_wind_shift=0, min_points=5)
-    return [{"type": "dry", "lats": s[0], "lons": s[1],
-             "is_merger": False, "label": ""} for s in segments]
+    return [FrontalFeature(type="dry", lats=s[0], lons=s[1],
+             is_merger=False, label="") for s in segments]
 
 
 def _haversine_km(lat1, lon1, lat2, lon2):
@@ -154,16 +156,16 @@ def detect_mergers(fronts, threshold_km=50):
         for j, f2 in enumerate(fronts):
             if i >= j:
                 continue
-            if f1["type"] == f2["type"]:
+            if f1.type == f2.type:
                 continue
-            for lat1, lon1 in zip(f1["lats"], f1["lons"]):
-                for lat2, lon2 in zip(f2["lats"], f2["lons"]):
+            for lat1, lon1 in zip(f1.lats, f1.lons):
+                for lat2, lon2 in zip(f2.lats, f2.lons):
                     if _haversine_km(lat1, lon1, lat2, lon2) < threshold_km:
-                        f1["is_merger"] = True
-                        f2["is_merger"] = True
-                        label = "TRIPLE POINT" if len({f1["type"], f2["type"]}) > 1 and len(fronts) > 2 else "MERGER"
-                        f1["label"] = label
-                        f2["label"] = label
+                        f1.is_merger = True
+                        f2.is_merger = True
+                        label = "TRIPLE POINT" if len({f1.type, f2.type}) > 1 and len(fronts) > 2 else "MERGER"
+                        f1.label = label
+                        f2.label = label
                         break
     return fronts
 

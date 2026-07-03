@@ -17,13 +17,34 @@ class TestCache:
         assert path.exists()
         assert path.read_bytes() == data
 
-    def test_manifest_tracks_entry(self):
+    def test_db_tracks_entry(self):
         data = b"test data"
         self.cache.store("tiles/test.png", data, source_url="https://example.com/test.png")
-        manifest = self.cache.load_manifest()
-        assert "tiles/test.png" in manifest
-        assert manifest["tiles/test.png"]["source_url"] == "https://example.com/test.png"
-        assert manifest["tiles/test.png"]["size"] == len(data)
+        stats = self.cache.stats()
+        assert stats["binary"]["count"] >= 1
+
+    def test_store_json_and_retrieve(self):
+        data = {"temperature": [20.5, 21.0], "source": "test"}
+        self.cache.store_json("json/test/data.json", data, source_url="https://example.com/api", ttl=3600)
+        result = self.cache.get_json("json/test/data.json", ttl=3600)
+        assert result is not None
+        assert result["temperature"] == [20.5, 21.0]
+
+    def test_json_ttl_expiry(self):
+        data = {"value": 42}
+        self.cache.store_json("json/test/expire.json", data, ttl=1)
+        import time
+        time.sleep(1.5)
+        result = self.cache.get_json("json/test/expire.json", ttl=1)
+        assert result is None
+
+    def test_invalidate_pattern(self):
+        self.cache.store("json/openmeteo/a.json", b'{}')
+        self.cache.store("json/openmeteo/b.json", b'{}')
+        self.cache.store("json/spc/c.json", b'{}')
+        self.cache.invalidate("json/openmeteo/*")
+        assert self.cache.get("json/openmeteo/a.json") is None
+        assert self.cache.get("json/spc/c.json") is not None
 
     def test_get_returns_path_if_cached(self):
         data = b"cached data"

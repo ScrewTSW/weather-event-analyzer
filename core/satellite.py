@@ -4,6 +4,8 @@ import math
 from pathlib import Path
 from typing import Optional
 
+from core.models import SatelliteFrame
+
 import requests
 from PIL import Image
 
@@ -183,11 +185,11 @@ class SatelliteClient:
                 img = self.fetch_wmts_tiles(source, ts, lat, lon, bbox_deg, zoom)
 
             if img:
-                results.append({
-                    "timestamp": ts,
-                    "image": img,
-                    "source": source_name,
-                    "layer": source["layer"],
-                })
+                results.append(SatelliteFrame(
+                    source=source_name,
+                    timestamp=ts,
+                    image=img,
+                    layer=source["layer"],
+                ))
 
         return results

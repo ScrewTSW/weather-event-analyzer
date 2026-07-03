@@ -2,6 +2,8 @@ import time
 
 import requests
 
+from core.models.pressure_levels.base import PressureLevelSnapshot, PressureLevelHourly
+
 USER_AGENT = "WeatherEventAnalyzer/1.0"
 
 PRESSURE_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500,
@@ -41,7 +43,7 @@ class PressureLevelClient:
             f"&past_days=7&wind_speed_unit=ms"
         )
 
-    def _parse_response(self, data: dict, synoptic_hour: int = None) -> dict:
+    def _parse_response(self, data: dict, synoptic_hour: int = None):
         hourly = data.get("hourly", {})
         timestamps = hourly.get("time", [])
 
@@ -55,41 +57,43 @@ class PressureLevelClient:
             if idx is None:
                 idx = 0
 
-            result = {
-                "source": "open-meteo-pressure",
-                "synoptic_time": timestamps[idx],
-                "pressure_levels": list(PRESSURE_LEVELS),
-                "latitude": data.get("latitude"),
-                "longitude": data.get("longitude"),
-                "timestamps": None,
-            }
+            var_data = {}
             for var in VARIABLES:
                 key = "dewpoint" if var == "dew_point" else var
-                result[key] = [
+                var_data[key] = [
                     hourly.get(f"{var}_{level}hPa", [None] * (idx + 1))[idx]
                     for level in PRESSURE_LEVELS
                 ]
-            return result
+
+            return PressureLevelSnapshot(
+                source="open-meteo-pressure",
+                synoptic_time=timestamps[idx],
+                pressure_levels=list(PRESSURE_LEVELS),
+                latitude=data.get("latitude"),
+                longitude=data.get("longitude"),
+                **var_data
+            )
         else:
             n_times = len(timestamps)
-            result = {
-                "source": "open-meteo-pressure",
-                "synoptic_time": None,
-                "pressure_levels": list(PRESSURE_LEVELS),
-                "latitude": data.get("latitude"),
-                "longitude": data.get("longitude"),
-                "timestamps": timestamps,
-            }
+            var_data = {}
             for var in VARIABLES:
                 key = "dewpoint" if var == "dew_point" else var
-                result[key] = [
+                var_data[key] = [
                     [hourly.get(f"{var}_{level}hPa", [None] * n_times)[t]
                      for level in PRESSURE_LEVELS]
                     for t in range(n_times)
                 ]
-            return result
 
-    def fetch_snapshot(self, lat: float, lon: float, date: str, hour: int) -> dict:
+            return PressureLevelHourly(
+                source="open-meteo-pressure",
+                pressure_levels=list(PRESSURE_LEVELS),
+                latitude=data.get("latitude"),
+                longitude=data.get("longitude"),
+                timestamps=timestamps,
+                **var_data
+            )
+
+    def fetch_snapshot(self, lat: float, lon: float, date: str, hour: int) -> PressureLevelSnapshot:
         synoptic = snap_to_synoptic(hour)
         url = self._build_openmeteo_url(lat, lon)
         time.sleep(0.3)
@@ -103,18 +107,18 @@ class PressureLevelClient:
             date_times = filtered_times
         return self._parse_response(raw, synoptic_hour=synoptic)
 
-    def fetch_hourly(self, lat: float, lon: float, date: str) -> dict:
+    def fetch_hourly(self, lat: float, lon: float, date: str) -> PressureLevelHourly:
         url = self._build_openmeteo_url(lat, lon)
         time.sleep(0.3)
         resp = self.session.get(url, timeout=30)
         resp.raise_for_status()
         raw = resp.json()
         result = self._parse_response(raw, synoptic_hour=None)
-        if result["timestamps"]:
-            filtered_idx = [i for i, ts in enumerate(result["timestamps"]) if ts.startswith(date)]
+        if result.timestamps:
+            filtered_idx = [i for i, ts in enumerate(result.timestamps) if ts.startswith(date)]
             if filtered_idx:
-                result["timestamps"] = [result["timestamps"][i] for i in filtered_idx]
+                result.timestamps = [result.timestamps[i] for i in filtered_idx]
                 for var in VARIABLES:
                     key = "dewpoint" if var == "dew_point" else var
-                    result[key] = [result[key][i] for i in filtered_idx]
+                    setattr(result, key, [getattr(result, key)[i] for i in filtered_idx])
         return result

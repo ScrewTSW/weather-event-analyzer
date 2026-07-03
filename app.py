@@ -97,8 +97,8 @@ renderNotches();
 """
 
 
-def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
-    cache_dir = default_cache_dir()
+def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
+    cache_dir = Path(cache_dir) if cache_dir else default_cache_dir()
     cache = Cache(str(cache_dir), max_size_gb=cache_max_gb)
     sat_client = SatelliteClient(cache)
     atmo_client = OpenMeteoClient()
@@ -163,7 +163,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             log("Fetching atmosphere...")
             yield out(info=info)
             atmo = atmo_client.fetch(lat, lon, date)
-            log(f"Atmosphere: {atmo['source']} ({len(atmo['timestamps'])}h)")
+            log(f"Atmosphere: {atmo.source} ({len(atmo.timestamps)}h)")
             cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin"))
             temp = _fig_to_pil(create_atmosphere_chart(atmo, "temp_dewpoint"))
             wind = _fig_to_pil(create_atmosphere_chart(atmo, "wind"))
@@ -190,7 +190,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                 profile = pressure_client.fetch_snapshot(lat, lon, date, sc_h)
                 sounding = _fig_to_pil(create_sounding_chart(profile))
                 hodo = _fig_to_pil(create_hodograph_chart(profile))
-                log(f"Sounding/Hodograph: {profile['source']} ({synoptic_h:02d}Z)")
+                log(f"Sounding/Hodograph: {profile.source} ({synoptic_h:02d}Z)")
             except Exception as e:
                 log(f"Sounding/Hodograph failed: {e}")
                 sounding, hodo = None, None
@@ -198,7 +198,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
             try:
                 profile_hourly = pressure_client.fetch_hourly(lat, lon, date)
                 cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin", profile_hourly=profile_hourly))
-                has_cape = "cape" in atmo.get("variables", {})
+                has_cape = "cape" in atmo.variables
                 log("Helicity added to CAPE/CIN chart" + ("" if has_cape else " (CAPE computed from profiles)"))
             except Exception as e:
                 log(f"Helicity computation failed: {e}")
@@ -214,7 +214,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
                 discussions = discussion_client.fetch(lat, lon, date)
                 disc_text = ""
                 for d in discussions:
-                    disc_text += f"### {d['title']} ({d['source']})\n\n{d['text']}\n\n---\n\n"
+                    disc_text += f"### {d.title} ({d.source})\n\n{d.text}\n\n---\n\n"
                 if not disc_text:
                     disc_text = "No mesoscale discussions available for this region."
                 log(f"Found {len(discussions)} discussion(s)")
@@ -259,11 +259,11 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 
             composed, labels = [], []
             for i, f in enumerate(frames):
-                ts = f["timestamp"]
+                ts = f.timestamp
                 label = ts.replace("T", " ").replace("Z", " UTC")
-                img = add_geo_overlay(f["image"], lat, lon, bbox_deg=bbox_deg,
+                img = add_geo_overlay(f.image, lat, lon, bbox_deg=bbox_deg,
                                       fronts=detected_fronts)
-                img = add_timestamp_label(img, label, f["source"], display)
+                img = add_timestamp_label(img, label, f.source, display)
                 composed.append(img)
                 labels.append(label)
                 if i == 0:
@@ -468,7 +468,7 @@ def create_app(cache_max_gb: float = 5.0) -> gr.Blocks:
 def _format_alerts(alerts):
     rows = []
     for a in alerts:
-        props = a.get("properties", {})
+        props = a.properties
         intensity = props.get("intensity_text", "")
         if not intensity or "Magnitude 0" in str(intensity):
             iv = props.get("intensity", "")
@@ -477,19 +477,19 @@ def _format_alerts(alerts):
                     intensity = f"{iv} {props.get('intensity_unit', '')}".strip()
                 else:
                     intensity = {"flood": "Active flooding", "drought": "Drought"}.get(
-                        a.get("event_type", ""), a["severity"].title())
+                        a.event_type, a.severity.title())
             except (ValueError, TypeError):
-                intensity = a["severity"].title()
+                intensity = a.severity.title()
         lat = props.get("lat", "")
         lon = props.get("lon", "")
-        geo = a.get("geometry") or {}
+        geo = a.geometry or {}
         if not lat and geo.get("coordinates"):
             c = geo["coordinates"]
             lon, lat = c[0], c[1]
         gps = f"{lat}, {lon}" if lat and lon else ""
         rows.append([
-            a["severity"].upper(), a["event_type"], a["title"][:60],
-            str(intensity)[:30], gps, a.get("source", ""),
-            a.get("valid_from", "")[:16], a.get("valid_to", "")[:16],
+            a.severity.upper(), a.event_type, a.title[:60],
+            str(intensity)[:30], gps, a.source,
+            a.valid_from[:16], a.valid_to[:16],
         ])
     return rows
