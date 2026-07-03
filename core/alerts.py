@@ -762,7 +762,8 @@ def detect_country(lat: float, lon: float) -> Optional[str]:
     return "germany"  # Default fallback
 
 
-def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[list[str]] = None) -> list[Alert]:
+def fetch_alerts(lat: float, lon: float, datetime_utc: str,
+                 sources: Optional[list[str]] = None, cache=None) -> list[Alert]:
     """
     Fetch alerts from multiple sources based on location and time.
 
@@ -771,10 +772,29 @@ def fetch_alerts(lat: float, lon: float, datetime_utc: str, sources: Optional[li
         lon: Longitude
         datetime_utc: ISO 8601 datetime string (e.g., "2026-06-06T14:00:00")
         sources: Optional list of source names to query. If None, auto-detect based on location.
+        cache: Optional Cache instance for caching results (5 min TTL).
 
     Returns:
         List of alerts sorted by severity (extreme first).
     """
+    if cache:
+        from dataclasses import asdict
+        date_part = datetime_utc[:10]
+        cache_key = f"json/alerts/{lat:.2f}_{lon:.2f}_{date_part}.json"
+        _req = CachedRequest(cache=cache)
+
+        def _compute():
+            result = _fetch_alerts_uncached(lat, lon, datetime_utc, sources)
+            return [asdict(a) for a in result]
+
+        cached = _req.fetch_or_compute(cache_key, _compute, ttl=300)
+        return [Alert(**a) for a in cached] if cached else []
+
+    return _fetch_alerts_uncached(lat, lon, datetime_utc, sources)
+
+
+def _fetch_alerts_uncached(lat: float, lon: float, datetime_utc: str,
+                           sources: Optional[list[str]] = None) -> list[Alert]:
     all_alerts = []
 
     # Parse datetime to determine if historical or current

@@ -90,11 +90,18 @@ class SatelliteClient:
         self.cache = cache
         self.req = CachedRequest(cache=cache)
 
+    OUTPUT_SIZE = 2048
+
     def _fetch_image(self, url: str, cache_key: str) -> Optional[Image.Image]:
         data = self.req.fetch_binary(url, cache_key=cache_key)
         if data:
             return Image.open(io.BytesIO(data)).convert("RGBA")
         return None
+
+    def _normalize(self, img: Image.Image) -> Image.Image:
+        if img.width == self.OUTPUT_SIZE and img.height == self.OUTPUT_SIZE:
+            return img
+        return img.resize((self.OUTPUT_SIZE, self.OUTPUT_SIZE), Image.LANCZOS)
 
     def fetch_wms_image(self, source: dict, time_str: str, lat: float, lon: float,
                         bbox_deg: float = 20.0, size: int = 1024) -> Optional[Image.Image]:
@@ -184,21 +191,38 @@ class SatelliteClient:
             on_progress(f"Generated {len(timestamps)} timestamps ({cadence}-min intervals)")
 
         results = []
+        stats_before = self.req.stats.cache_hits
         for i, ts in enumerate(timestamps):
-            if on_progress:
-                on_progress(f"Fetching {i+1}/{len(timestamps)}: {ts}")
+            hits_before = self.req.stats.cache_hits
 
             if source["type"] in ("gibs_wms", "eumetsat_wms"):
-                img = self.fetch_wms_image(source, ts, lat, lon, bbox_deg, size=800)
+                img = self.fetch_wms_image(source, ts, lat, lon, bbox_deg, size=self.OUTPUT_SIZE)
             else:
                 img = self.fetch_wmts_tiles(source, ts, lat, lon, bbox_deg, zoom)
 
+            was_cached = self.req.stats.cache_hits > hits_before
+            tag = "CACHE" if was_cached else "PULLED"
+            if on_progress:
+                on_progress(f"{tag} {i+1}/{len(timestamps)}: {ts}")
+
             if img:
+                half = bbox_deg / 2
+                frame_bbox = (
+                    max(lat - half, -65.0),
+                    min(lat + half, 65.0),
+                    lon - half,
+                    lon + half,
+                )
                 results.append(SatelliteFrame(
                     source=source_name,
                     timestamp=ts,
-                    image=img,
+                    image=self._normalize(img),
                     layer=source["layer"],
+                    bbox=frame_bbox,
                 ))
 
+        cache_hits = self.req.stats.cache_hits - stats_before
+        api_calls = len(timestamps) - cache_hits
+        if on_progress:
+            on_progress(f"Got {len(results)} frames ({cache_hits} CACHE, {api_calls} PULLED)")
         return results

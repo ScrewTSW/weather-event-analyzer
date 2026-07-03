@@ -10,7 +10,7 @@ matplotlib.use("Agg")
 from PIL import Image
 
 from core.cache import Cache, default_cache_dir
-from core.location import resolve_location
+from core.location import resolve_location, init_cache as init_location_cache
 from core.satellite import SatelliteClient, SOURCES
 from core.atmosphere import OpenMeteoClient
 from core.alerts import fetch_alerts
@@ -100,6 +100,7 @@ renderNotches();
 def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
     cache_dir = Path(cache_dir) if cache_dir else default_cache_dir()
     cache = Cache(str(cache_dir), max_size_gb=cache_max_gb)
+    init_location_cache(cache)
     sat_client = SatelliteClient(cache)
     atmo_client = OpenMeteoClient(cache=cache)
     pressure_client = PressureLevelClient(cache=cache)
@@ -113,8 +114,17 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         # outputs: image, timeline_html, cape, temp, wind, info, log, alerts, sounding, hodo, discussion, synoptic_label, progress
         empty = (None, "", None, None, None, "", "", [], None, None, "", "", "")
 
+        import logging
+        _file_logger = logging.getLogger("wea")
+        if not _file_logger.handlers:
+            _fh = logging.FileHandler("weather-event-analyzer.log")
+            _fh.setFormatter(logging.Formatter("%(asctime)s %(message)s", datefmt="%H:%M:%S"))
+            _file_logger.addHandler(_fh)
+            _file_logger.setLevel(logging.INFO)
+
         def log(msg):
             log_lines.append(msg)
+            _file_logger.info(msg)
 
         def progress_html(text, pct):
             return f'<div style="position:relative;background:#222;border-radius:6px;height:28px;overflow:hidden"><div style="background:#2a7a3a;height:100%;width:{pct}%;transition:width 0.3s"></div><div style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;font-weight:bold">{text}</div></div>'
@@ -187,47 +197,54 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 return Image.open(buf).convert("RGB")
 
             # 1. Atmosphere (fast)
-            log("Fetching atmosphere...")
             yield out(info=info, progress=progress_html("Fetching atmospheric data...", 15))
+            h_before = atmo_client.req.stats.cache_hits
             atmo = atmo_client.fetch(lat, lon, date)
-            log(f"Atmosphere: {atmo.source} ({len(atmo.timestamps)}h)")
-            log("Rendering charts...")
+            atmo_tag = "CACHE" if atmo_client.req.stats.cache_hits > h_before else "PULLED"
+            log(f"{atmo_tag} atmosphere: {atmo.source} ({len(atmo.timestamps)}h)")
             yield out(info=info, progress=progress_html("Rendering charts...", 25))
             cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin"))
             temp = _fig_to_pil(create_atmosphere_chart(atmo, "temp_dewpoint"))
             wind = _fig_to_pil(create_atmosphere_chart(atmo, "wind"))
+            log("Rendered time-series charts")
             yield out(info=info, cape=cape, temp=temp, wind=wind, progress=progress_html("Rendering charts...", 25))
 
-            # 2. Alerts (fast)
-            log("Fetching alerts...")
+            # 2. Alerts
             yield out(info=info, cape=cape, temp=temp, wind=wind, progress=progress_html("Fetching alerts...", 60))
             sc = start_utc.replace(":", ""); ec = end_utc.replace(":", "")
             mid = str((int(sc) + int(ec)) // 2).zfill(4)
-            alerts_raw = fetch_alerts(lat, lon, f"{date}T{mid[:2]}:{mid[2:]}:00")
-            log(f"Found {len(alerts_raw)} alerts")
+            _alerts_cache_before = cache.stats().get("json", {}).get("count", 0) if cache else 0
+            alerts_raw = fetch_alerts(lat, lon, f"{date}T{mid[:2]}:{mid[2:]}:00", cache=cache)
+            _alerts_cache_after = cache.stats().get("json", {}).get("count", 0) if cache else 0
+            alert_tag = "CACHE" if _alerts_cache_after == _alerts_cache_before else "PULLED"
+            log(f"{alert_tag} {len(alerts_raw)} alerts")
             alerts_data = _format_alerts(alerts_raw)
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Fetching alerts...", 60))
 
             # 3. Pressure-level data (sounding, hodograph, helicity)
-            log("Fetching pressure-level data...")
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Fetching pressure-level data...", 35))
             sc_h = int(start_utc.replace(":", "")[:2]) if start_utc else 12
             synoptic_h = snap_to_synoptic(sc_h)
             synoptic_label = f"Synoptic time: {synoptic_h:02d}Z {date}"
 
             try:
+                h_before = pressure_client.req.stats.cache_hits
                 profile = pressure_client.fetch_snapshot(lat, lon, date, sc_h)
-                log("Rendering sounding & hodograph...")
+                snap_tag = "CACHE" if pressure_client.req.stats.cache_hits > h_before else "PULLED"
+                log(f"{snap_tag} pressure snapshot ({synoptic_h:02d}Z)")
                 yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Rendering sounding & hodograph...", 50))
                 sounding = _fig_to_pil(create_sounding_chart(profile))
                 hodo = _fig_to_pil(create_hodograph_chart(profile))
-                log(f"Sounding/Hodograph: {profile.source} ({synoptic_h:02d}Z)")
+                log("Rendered sounding & hodograph")
             except Exception as e:
                 log(f"Sounding/Hodograph failed: {e}")
                 sounding, hodo = None, None
 
             try:
+                h_before = pressure_client.req.stats.cache_hits
                 profile_hourly = pressure_client.fetch_hourly(lat, lon, date)
+                hourly_tag = "CACHE" if pressure_client.req.stats.cache_hits > h_before else "PULLED"
+                log(f"{hourly_tag} pressure hourly")
                 cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin", profile_hourly=profile_hourly))
                 has_cape = "cape" in atmo.variables
                 log("Helicity added to CAPE/CIN chart" + ("" if has_cape else " (CAPE computed from profiles)"))
@@ -238,17 +255,19 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                       sounding=sounding, hodo=hodo, synoptic_label=synoptic_label, progress=progress_html("Rendering sounding & hodograph...", 50))
 
             # 4. Mesoscale discussions
-            log("Fetching mesoscale discussions...")
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
                       sounding=sounding, hodo=hodo, synoptic_label=synoptic_label, progress=progress_html("Fetching mesoscale discussions...", 70))
             try:
+                h_before = discussion_client.req.stats.cache_hits
                 discussions = discussion_client.fetch(lat, lon, date)
+                disc_hits = discussion_client.req.stats.cache_hits - h_before
+                disc_tag = "CACHE" if disc_hits > 0 else "PULLED"
                 disc_text = ""
                 for d in discussions:
                     disc_text += f"=== {d.title} ({d.source}) ===\n\n{d.text}\n\n{'─' * 60}\n\n"
                 if not disc_text:
                     disc_text = "No mesoscale discussions available for this region."
-                log(f"Found {len(discussions)} discussion(s)")
+                log(f"{disc_tag} {len(discussions)} discussion(s)")
             except Exception as e:
                 log(f"Discussions failed: {e}")
                 disc_text = "Failed to fetch mesoscale discussions."
