@@ -367,52 +367,61 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         return f'<span class="wea-tip">i<span class="wea-tt">{safe}</span></span>'
 
     TIP_SAT = tip(
-        "Satellite imagery from GOES, Meteosat, or Himawari. Look for: "
-        "rapidly expanding cloud tops (overshooting tops), V-shaped anvils, "
-        "back-building cells, and dark shadows indicating tall storms. "
-        "Frontal boundaries may be overlaid when enabled."
+        "Satellite imagery from GOES, Meteosat, or Himawari (geocolor or IR). "
+        "Severe weather signs: rapidly expanding cloud tops (overshooting tops), "
+        "V-shaped or enhanced-V anvils, back-building cells, and persistent cold cloud tops in IR. "
+        "In geocolor: dark shadows cast by tall storms indicate strong updrafts. "
+        "Watch for cloud-free slots behind cold fronts and clearing ahead of dry lines."
     )
     TIP_CAPE = tip(
-        "CAPE (red fill) = energy available for thunderstorm updrafts. "
-        "Values >1000 J/kg suggest strong storms, >2500 J/kg severe potential. "
-        "CIN (cyan) = cap strength; high CIN suppresses initiation until a trigger breaks it. "
-        "Helicity (magenta) = SRH 0-3km (solid) and 0-1km (dashed); "
-        "values >150 m²/s² favor supercells, >300 favor tornadoes."
+        "Time series of convective energy and shear. "
+        "CAPE (red fill): energy for updrafts. >1000 J/kg = strong storms, >2500 = severe potential. "
+        "CIN (cyan line): cap inhibiting initiation. High CIN delays storms until a trigger (front, boundary, heating) breaks it. "
+        "Rapidly falling CIN + rising CAPE = storms imminent. "
+        "Helicity (magenta): SRH 0-3km solid, 0-1km dashed. "
+        "SRH >150 m²/s² favors supercells, >300 favors tornadoes."
     )
     TIP_TEMP = tip(
-        "Temperature (red) and dewpoint (green) at 2m height over time. "
-        "A narrowing spread (T-Td < 3°C) means high moisture. "
-        "Watch for rapid dewpoint rises (moisture advection) or sharp temperature drops (outflow boundaries)."
+        "Surface temperature (red) and dewpoint (green) at 2m over time. "
+        "T-Td spread <3°C = high moisture, supports strong storms. "
+        "Rapid dewpoint rise = moisture advection (fuel for storms). "
+        "Sharp temperature drop + wind shift = outflow boundary or frontal passage. "
+        "Dewpoint pooling (steady high Td) ahead of a boundary is a key severe weather ingredient."
     )
     TIP_WIND = tip(
-        "Surface wind speed (cyan) and gusts (red dashed). "
-        "Sudden wind shifts or gust spikes can indicate outflow boundaries or frontal passages. "
-        "Sustained winds >15 m/s with gusts >25 m/s suggest damaging wind potential."
+        "Surface wind speed (cyan) and gusts (red dashed) at 10m. "
+        "Wind shift (direction change) + gust spike = outflow boundary, frontal passage, or mesoscale boundary. "
+        "Sustained >15 m/s with gusts >25 m/s = damaging wind potential. "
+        "Veering winds (shifting clockwise over time) indicate warm air advection and increasing shear."
     )
     TIP_SKEWT = tip(
-        "Skew-T Log-P sounding: temperature (red), dewpoint (green), parcel path (yellow dashed). "
-        "Red shading = CAPE (positive buoyancy), blue = CIN (cap). "
-        "LCL = cloud base, LFC = free convection level, EL = equilibrium level. "
-        "Steep lapse rates (temp line tilting far left) and high moisture (green close to red) "
-        "indicate strong instability. Wind barbs show speed/direction at each level."
+        "Vertical temperature/moisture profile at the selected synoptic time. "
+        "Temperature (red), dewpoint (green), parcel path (yellow dashed). "
+        "Red shading = CAPE, blue = CIN. LCL = cloud base, LFC = free convection, EL = storm top. "
+        "Cyan dotted = 0°C (freezing level), purple dotted = −20°C (hail growth zone). "
+        "Deep layer between 0°C and −20°C = larger hail potential. "
+        "SBCAPE/MLCAPE/MUCAPE shown in bottom-left. "
+        "Green moist adiabats, red-brown dry adiabats, teal mixing ratio lines labeled in g/kg."
     )
     TIP_HODO = tip(
-        "Hodograph shows wind shear profile. Each color = altitude band. "
-        "Long, curved traces indicate strong shear favoring supercells. "
-        "Clockwise turning (veering) in 0-3km supports right-moving supercells. "
-        "RM/LM = Bunkers right/left mover storm motion. "
-        "Large area between 0-1km curve and storm motion = high SRH = tornado potential."
+        "Wind shear profile with color-coded altitude bands and wind barbs by pressure level. "
+        "Purple = 0-0.5km, red = 0.5-1km, orange = 1-3km, yellow = 3-6km, green = 6-9km, blue = 9+km. "
+        "RM (magenta) / LM (cyan) = Bunkers right/left mover storm motion, MW = mean wind. "
+        "Supercell signatures: long curved trace with strong clockwise veering in 0-3km. "
+        "Tornado potential: strong 0-1km veering (large purple/red curve bowing away from origin), "
+        "SRH 0-1km >150 m²/s², 0-1km bulk shear >20 kt, and RM well separated from the 0-0.5km wind."
     )
     TIP_DISC = tip(
-        "Mesoscale discussions from regional weather services (SPC, ESTOFEX, BOM, etc.). "
-        "These are expert text analyses of current severe weather potential, "
-        "describing expected storm modes, timing, and primary hazards."
+        "Mesoscale discussions from regional weather services (SPC for US, ESTOFEX for Europe, BOM for Australia, etc.). "
+        "These are expert text analyses describing current mesoscale environment, expected storm modes, "
+        "timing windows, primary hazards (tornado, hail, wind), and watch issuance probability. "
+        "Updated every 30 min to 2 hours depending on the source."
     )
     TIP_ALERTS = tip(
-        "Active severe weather alerts from global sources. "
-        "EXTREME = life-threatening (tornadoes, major hurricanes). "
-        "SEVERE = significant damage potential. "
-        "Check event type and timing to assess immediate risk."
+        "Active severe weather alerts from global sources (NWS, GDACS, ESTOFEX, IBTrACS, PTWC, SPC, MeteoAlarm). "
+        "EXTREME = life-threatening (tornadoes, major hurricanes, tsunamis). "
+        "SEVERE = significant damage potential (large hail, damaging winds, flash flooding). "
+        "Sorted by severity. Check event type, timing, and distance from your location."
     )
 
     with gr.Blocks(title="Weather Event Analyzer") as app:
