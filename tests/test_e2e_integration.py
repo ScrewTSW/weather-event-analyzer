@@ -319,6 +319,31 @@ class TestCachingE2E:
         cache2 = Cache(self.cache_dir, max_size_gb=0.1)
         assert cache2.stats().get("json", {}).get("size_bytes", 0) == size_before
 
+    def test_satellite_cache_hit(self):
+        import tempfile
+        from core.satellite import SatelliteClient
+        from core.cache import Cache
+        cache = Cache(tempfile.mkdtemp(), max_size_gb=0.1)
+        cache.cleanup(max_age_hours=0)
+        client = SatelliteClient(cache)
+
+        before = cache.stats().get("binary", {}).get("count", 0)
+        frames1 = client.fetch_event(
+            lat=42.3, lon=-83.0, date="20260702",
+            start_utc="1500", end_utc="1510",
+            product="goes_east_geocolor", zoom=2, bbox_deg=20,
+        )
+        after = cache.stats().get("binary", {}).get("count", 0)
+        assert after > before, "Binary cache should grow after satellite fetch"
+
+        frames2 = client.fetch_event(
+            lat=42.3, lon=-83.0, date="20260702",
+            start_utc="1500", end_utc="1510",
+            product="goes_east_geocolor", zoom=2, bbox_deg=20,
+        )
+        assert cache.stats().get("binary", {}).get("count", 0) == after, "Cache should not grow on re-fetch"
+        assert len(frames2) == len(frames1)
+
     def test_cached_data_preserves_types(self):
         from core.atmosphere import OpenMeteoClient
         client = OpenMeteoClient(cache=self.cache)
