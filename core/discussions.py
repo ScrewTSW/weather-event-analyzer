@@ -1,11 +1,18 @@
 import html
 import logging
 import re
-import time
-
-import requests
 
 from core.models import Discussion
+from core.api_request import CachedRequest
+
+from core.alerts import (
+    is_us_location, is_europe_location, is_canada_location,
+    is_australia_location, is_japan_location, is_india_location,
+    is_south_america_location, is_southeast_asia_location,
+    is_southern_africa_location,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def _clean_html(raw):
@@ -16,16 +23,6 @@ def _clean_html(raw):
     text = html.unescape(text)
     text = re.sub(r'\n{3,}', '\n\n', text).strip()
     return text
-
-from core.alerts import (
-    is_us_location, is_europe_location, is_canada_location,
-    is_australia_location, is_japan_location, is_india_location,
-    is_south_america_location, is_southeast_asia_location,
-    is_southern_africa_location,
-)
-
-USER_AGENT = "WeatherEventAnalyzer/1.0"
-logger = logging.getLogger(__name__)
 
 
 def select_sources(lat, lon):
@@ -55,9 +52,7 @@ def select_sources(lat, lon):
 
 class MesoscaleDiscussionClient:
     def __init__(self, cache=None):
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
-        self.cache = cache
+        self.req = CachedRequest(cache=cache)
 
     def fetch(self, lat, lon, date):
         sources = select_sources(lat, lon)
@@ -86,112 +81,67 @@ class MesoscaleDiscussionClient:
         return results
 
     def _fetch_spc_md(self):
-        cache_key = "json/discussion/spc_md_index.json"
-        url = "https://www.spc.noaa.gov/products/md/"
-        try:
-            cached_results = None
-            if self.cache:
-                cached_results = self.cache.get_json(cache_key, ttl=1800)
-
-            if cached_results:
-                return [Discussion(**d) for d in cached_results]
-
-            time.sleep(0.3)
-            resp = self.session.get(url, timeout=15)
-            resp.raise_for_status()
-            md_links = re.findall(r'href="(md\d{4}\.html)"', resp.text)
+        def _compute():
+            index_html = self.req.fetch_text("https://www.spc.noaa.gov/products/md/")
+            md_links = re.findall(r'href="(md\d{4}\.html)"', index_html)
             results = []
             for link in md_links[:5]:
-                md_url = f"{url}{link}"
-                time.sleep(0.3)
-                md_resp = self.session.get(md_url, timeout=15)
-                if md_resp.status_code == 200:
-                    pre_match = re.search(r'<pre>(.*?)</pre>', md_resp.text, re.DOTALL)
-                    if pre_match:
-                        text = html.unescape(pre_match.group(1)).strip()
-                    else:
-                        text = _clean_html(md_resp.text)
-                    number = re.search(r'md(\d+)', link)
-                    title = f"SPC Mesoscale Discussion #{number.group(1)}" if number else "SPC MD"
-                    results.append(Discussion(
-                        source="spc_md", region="US",
-                        title=title, text=text[:3000],
-                        valid_from="", valid_to="", url=md_url,
-                    ))
-
-            if self.cache and results:
-                serialized = [vars(d) for d in results]
-                self.cache.store_json(cache_key, serialized, source_url=url, ttl=1800)
-
+                md_url = f"https://www.spc.noaa.gov/products/md/{link}"
+                md_html = self.req.fetch_text(md_url)
+                pre_match = re.search(r'<pre>(.*?)</pre>', md_html, re.DOTALL)
+                if pre_match:
+                    text = html.unescape(pre_match.group(1)).strip()
+                else:
+                    text = _clean_html(md_html)
+                number = re.search(r'md(\d+)', link)
+                title = f"SPC Mesoscale Discussion #{number.group(1)}" if number else "SPC MD"
+                results.append(vars(Discussion(
+                    source="spc_md", region="US",
+                    title=title, text=text[:3000],
+                    valid_from="", valid_to="", url=md_url,
+                )))
             return results
-        except Exception as e:
-            logger.warning(f"SPC MD fetch failed: {e}")
-            return []
+
+        cached = self.req.fetch_or_compute("json/discussion/spc_md_index.json", _compute, ttl=1800)
+        return [Discussion(**d) for d in cached] if cached else []
 
     def _fetch_spc_outlook(self):
-        cache_key = "json/discussion/spc_outlook.json"
-        url = "https://tgftp.nws.noaa.gov/data/raw/ac/acus01.kwns.swo.dy1.txt"
-        try:
-            if self.cache:
-                cached = self.cache.get_json(cache_key, ttl=3600)
-                if cached:
-                    return [Discussion(**cached)]
+        def _compute():
+            text = self.req.fetch_text("https://tgftp.nws.noaa.gov/data/raw/ac/acus01.kwns.swo.dy1.txt")
+            return vars(Discussion(
+                source="spc_outlook", region="US",
+                title="SPC Day 1 Convective Outlook",
+                text=text[:3000], valid_from="", valid_to="",
+                url="https://www.spc.noaa.gov/products/outlook/day1otlk.html",
+            ))
 
-            time.sleep(0.3)
-            resp = self.session.get(url, timeout=15)
-            if resp.status_code == 200:
-                result = Discussion(
-                    source="spc_outlook", region="US",
-                    title="SPC Day 1 Convective Outlook",
-                    text=resp.text[:3000],
-                    valid_from="", valid_to="",
-                    url="https://www.spc.noaa.gov/products/outlook/day1otlk.html",
-                )
-                if self.cache:
-                    self.cache.store_json(cache_key, vars(result), source_url=url, ttl=3600)
-                return [result]
-        except Exception as e:
-            logger.warning(f"SPC outlook fetch failed: {e}")
-        return []
+        cached = self.req.fetch_or_compute("json/discussion/spc_outlook.json", _compute, ttl=3600)
+        return [Discussion(**cached)] if cached else []
 
     def _fetch_estofex(self):
-        cache_key = "json/discussion/estofex.json"
-        url = "https://www.estofex.org/cgi-bin/polygon/showforecast.cgi?text=yes"
-        try:
-            if self.cache:
-                cached = self.cache.get_json(cache_key, ttl=7200)
-                if cached:
-                    return [Discussion(**cached)]
+        def _compute():
+            raw = self.req.fetch_text("https://www.estofex.org/cgi-bin/polygon/showforecast.cgi?text=yes")
+            text = _clean_html(raw)
+            return vars(Discussion(
+                source="estofex", region="Europe",
+                title="ESTOFEX Convective Forecast",
+                text=text[:3000], valid_from="", valid_to="",
+                url="https://www.estofex.org/cgi-bin/polygon/showforecast.cgi?text=yes",
+            ))
 
-            time.sleep(0.3)
-            resp = self.session.get(url, timeout=15)
-            if resp.status_code == 200:
-                text = _clean_html(resp.text)
-                result = Discussion(
-                    source="estofex", region="Europe",
-                    title="ESTOFEX Convective Forecast",
-                    text=text[:3000],
-                    valid_from="", valid_to="", url=url,
-                )
-                if self.cache:
-                    self.cache.store_json(cache_key, vars(result), source_url=url, ttl=7200)
-                return [result]
-        except Exception as e:
-            logger.warning(f"ESTOFEX fetch failed: {e}")
-        return []
+        cached = self.req.fetch_or_compute("json/discussion/estofex.json", _compute, ttl=7200)
+        return [Discussion(**cached)] if cached else []
 
     def _fetch_eccc(self):
-        url = "https://dd.weather.gc.ca/today/alerts/cap/"
         try:
-            time.sleep(0.3)
-            resp = self.session.get(url, timeout=15)
-            if resp.status_code == 200:
-                return [Discussion(
-                    source="eccc", region="Canada",
-                    title="Environment Canada Alerts",
-                    text="See ECCC alerts feed for current warnings.",
-                    valid_from="", valid_to="", url=url,
-                )]
+            self.req.fetch_text("https://dd.weather.gc.ca/today/alerts/cap/")
+            return [Discussion(
+                source="eccc", region="Canada",
+                title="Environment Canada Alerts",
+                text="See ECCC alerts feed for current warnings.",
+                valid_from="", valid_to="",
+                url="https://dd.weather.gc.ca/today/alerts/cap/",
+            )]
         except Exception as e:
             logger.warning(f"ECCC fetch failed: {e}")
         return []
@@ -199,21 +149,18 @@ class MesoscaleDiscussionClient:
     def _fetch_bom(self):
         url = "https://api.weather.bom.gov.au/v1/warnings"
         try:
-            time.sleep(0.3)
-            resp = self.session.get(url, timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                results = []
-                warnings = data.get("data", []) if isinstance(data, dict) else data if isinstance(data, list) else []
-                for w in warnings[:5]:
-                    title = w.get("title", "BOM Warning") if isinstance(w, dict) else "BOM Warning"
-                    text = w.get("short_text", "") if isinstance(w, dict) else str(w)
-                    results.append(Discussion(
-                        source="bom", region="Australia",
-                        title=title, text=text[:3000],
-                        valid_from="", valid_to="", url=url,
-                    ))
-                return results
+            data = self.req.fetch_json(url)
+            results = []
+            warnings = data.get("data", []) if isinstance(data, dict) else data if isinstance(data, list) else []
+            for w in warnings[:5]:
+                title = w.get("title", "BOM Warning") if isinstance(w, dict) else "BOM Warning"
+                text = w.get("short_text", "") if isinstance(w, dict) else str(w)
+                results.append(Discussion(
+                    source="bom", region="Australia",
+                    title=title, text=text[:3000],
+                    valid_from="", valid_to="", url=url,
+                ))
+            return results
         except Exception as e:
             logger.warning(f"BOM fetch failed: {e}")
         return []
@@ -235,20 +182,17 @@ class MesoscaleDiscussionClient:
     def _fetch_smn(self):
         url = "https://ws.smn.gob.ar/alerts/type/AL"
         try:
-            time.sleep(0.3)
-            resp = self.session.get(url, timeout=15)
-            if resp.status_code == 200:
-                data = resp.json()
-                results = []
-                for alert in (data if isinstance(data, list) else [])[:5]:
-                    results.append(Discussion(
-                        source="smn", region="Argentina",
-                        title=alert.get("title", "SMN Alert"),
-                        text=alert.get("description", "")[:3000],
-                        valid_from=alert.get("date", ""),
-                        valid_to="", url=url,
-                    ))
-                return results
+            data = self.req.fetch_json(url)
+            results = []
+            for alert in (data if isinstance(data, list) else [])[:5]:
+                results.append(Discussion(
+                    source="smn", region="Argentina",
+                    title=alert.get("title", "SMN Alert"),
+                    text=alert.get("description", "")[:3000],
+                    valid_from=alert.get("date", ""),
+                    valid_to="", url=url,
+                ))
+            return results
         except Exception as e:
             logger.warning(f"SMN fetch failed: {e}")
         return []

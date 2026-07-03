@@ -45,7 +45,7 @@ class TestSelectSources:
 
 
 class TestMesoscaleDiscussionClient:
-    @patch("core.discussions.requests.Session")
+    @patch("core.api_request.requests.Session")
     def test_fetch_spc_md(self, mock_session_cls):
         mock_resp = MagicMock()
         mock_resp.status_code = 200

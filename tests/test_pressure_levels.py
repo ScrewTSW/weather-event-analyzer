@@ -73,7 +73,7 @@ class TestPressureLevelClientParse:
 
 
 class TestPressureLevelClientFetch:
-    @patch("core.pressure_levels.requests.Session")
+    @patch("core.api_request.requests.Session")
     def test_fetch_snapshot_calls_api(self, mock_session_cls):
         mock_resp = MagicMock()
         mock_resp.status_code = 200

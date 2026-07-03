@@ -1,17 +1,14 @@
 import io
-import time
 import math
 from pathlib import Path
 from typing import Optional
 
 from core.models import SatelliteFrame
+from core.api_request import CachedRequest
 
-import requests
 from PIL import Image
 
 from core.cache import Cache
-
-USER_AGENT = "WeatherEventAnalyzer/1.0"
 GIBS_WMTS = "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best"
 GIBS_WMS = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
 EUMETSAT_WMS = "https://view.eumetsat.int/geoserver/wms"
@@ -91,21 +88,12 @@ def _generate_timestamps(date: str, start_utc: str, end_utc: str, cadence_min: i
 class SatelliteClient:
     def __init__(self, cache: Cache):
         self.cache = cache
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
+        self.req = CachedRequest(cache=cache)
 
     def _fetch_image(self, url: str, cache_key: str) -> Optional[Image.Image]:
-        cached = self.cache.get(cache_key)
-        if cached:
-            return Image.open(cached).convert("RGBA")
-        try:
-            time.sleep(0.15)
-            resp = self.session.get(url, timeout=30)
-            if resp.status_code == 200 and len(resp.content) > 500:
-                self.cache.store(cache_key, resp.content, source_url=url)
-                return Image.open(io.BytesIO(resp.content)).convert("RGBA")
-        except Exception:
-            pass
+        data = self.req.fetch_binary(url, cache_key=cache_key, rate_limit=0.15)
+        if data:
+            return Image.open(io.BytesIO(data)).convert("RGBA")
         return None
 
     def fetch_wms_image(self, source: dict, time_str: str, lat: float, lon: float,

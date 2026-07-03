@@ -270,11 +270,15 @@ class TestCachingE2E:
         before_count = self._json_count()
         result1 = client.fetch(42.3, -83.0, "2026-07-02")
         assert isinstance(result1, AtmosphereData)
+        api_calls_after_first = client.req.stats.api_calls
+        assert api_calls_after_first > 0, "Should have made API calls"
         after_count = self._json_count()
         assert after_count > before_count, "Cache should grow after first fetch"
 
         result2 = client.fetch(42.3, -83.0, "2026-07-02")
         assert isinstance(result2, AtmosphereData)
+        assert client.req.stats.api_calls == api_calls_after_first, "Cache hit should NOT make API calls"
+        assert client.req.stats.cache_hits > 0, "Should have cache hits"
         assert self._json_count() == after_count, "Cache should not grow on cache hit"
         assert result2.source == result1.source
         assert len(result2.timestamps) == len(result1.timestamps)
@@ -286,10 +290,14 @@ class TestCachingE2E:
         before_count = self._json_count()
         result1 = client.fetch_snapshot(42.3, -83.0, "2026-07-02", 12)
         assert isinstance(result1, PressureLevelSnapshot)
+        api_calls_after_first = client.req.stats.api_calls
+        assert api_calls_after_first > 0, "Should have made API calls"
         after_count = self._json_count()
         assert after_count > before_count
 
         result2 = client.fetch_snapshot(42.3, -83.0, "2026-07-02", 12)
+        assert client.req.stats.api_calls == api_calls_after_first, "Cache hit should NOT make API calls"
+        assert client.req.stats.cache_hits > 0, "Should have cache hits"
         assert self._json_count() == after_count
         assert result2.synoptic_time == result1.synoptic_time
 
@@ -300,10 +308,14 @@ class TestCachingE2E:
         before_count = self._json_count()
         result1 = client.fetch(35.0, -97.0, "2026-07-02")
         assert isinstance(result1, list)
+        api_calls_after_first = client.req.stats.api_calls
+        assert api_calls_after_first > 0, "Should have made API calls"
         after_count = self._json_count()
         assert after_count > before_count
 
         result2 = client.fetch(35.0, -97.0, "2026-07-02")
+        # Discussions use high-level result caching, so cache hits don't increment req.stats
+        assert client.req.stats.api_calls == api_calls_after_first, "Cache hit should NOT make API calls"
         assert self._json_count() == after_count
         if result1:
             assert result2[0].title == result1[0].title

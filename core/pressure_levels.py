@@ -1,10 +1,5 @@
-import time
-
-import requests
-
 from core.models.pressure_levels.base import PressureLevelSnapshot, PressureLevelHourly
-
-USER_AGENT = "WeatherEventAnalyzer/1.0"
+from core.api_request import CachedRequest
 
 PRESSURE_LEVELS = [1000, 975, 950, 925, 900, 850, 800, 700, 600, 500,
                    400, 300, 250, 200, 150, 100, 70, 50, 30]
@@ -27,9 +22,7 @@ def snap_to_synoptic(hour: int) -> int:
 
 class PressureLevelClient:
     def __init__(self, cache=None):
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
-        self.cache = cache
+        self.req = CachedRequest(cache=cache)
 
     def _build_openmeteo_url(self, lat: float, lon: float) -> str:
         params = []
@@ -97,45 +90,14 @@ class PressureLevelClient:
     def fetch_snapshot(self, lat: float, lon: float, date: str, hour: int) -> PressureLevelSnapshot:
         synoptic = snap_to_synoptic(hour)
         cache_key = f"json/pressure/snapshot/{lat}_{lon}_{date}_{synoptic}.json"
-        if self.cache:
-            cached = self.cache.get_json(cache_key, ttl=3600)
-            if cached:
-                return self._parse_response(cached, synoptic_hour=synoptic)
         url = self._build_openmeteo_url(lat, lon)
-        time.sleep(0.3)
-        resp = self.session.get(url, timeout=30)
-        resp.raise_for_status()
-        raw = resp.json()
-        if self.cache:
-            self.cache.store_json(cache_key, raw, source_url=url, ttl=3600)
-        hourly = raw.get("hourly", {})
-        filtered_times = hourly.get("time", [])
-        date_times = [t for t in filtered_times if t.startswith(date)]
-        if not date_times:
-            date_times = filtered_times
+        raw = self.req.fetch_json(url, cache_key=cache_key, ttl=3600)
         return self._parse_response(raw, synoptic_hour=synoptic)
 
     def fetch_hourly(self, lat: float, lon: float, date: str) -> PressureLevelHourly:
         cache_key = f"json/pressure/hourly/{lat}_{lon}_{date}.json"
-        if self.cache:
-            cached = self.cache.get_json(cache_key, ttl=3600)
-            if cached:
-                result = self._parse_response(cached, synoptic_hour=None)
-                if result.timestamps:
-                    filtered_idx = [i for i, ts in enumerate(result.timestamps) if ts.startswith(date)]
-                    if filtered_idx:
-                        result.timestamps = [result.timestamps[i] for i in filtered_idx]
-                        for var in VARIABLES:
-                            key = "dewpoint" if var == "dew_point" else var
-                            setattr(result, key, [getattr(result, key)[i] for i in filtered_idx])
-                return result
         url = self._build_openmeteo_url(lat, lon)
-        time.sleep(0.3)
-        resp = self.session.get(url, timeout=30)
-        resp.raise_for_status()
-        raw = resp.json()
-        if self.cache:
-            self.cache.store_json(cache_key, raw, source_url=url, ttl=3600)
+        raw = self.req.fetch_json(url, cache_key=cache_key, ttl=3600)
         result = self._parse_response(raw, synoptic_hour=None)
         if result.timestamps:
             filtered_idx = [i for i, ts in enumerate(result.timestamps) if ts.startswith(date)]

@@ -1,7 +1,7 @@
 import math
 from typing import Optional
 
-import requests
+from core.api_request import CachedRequest
 
 SATELLITES = [
     {"name": "Himawari-9", "slider_id": "himawari", "lon": 140.7, "cadence_min": 10, "ir_band": "band_13", "ts_seconds": "00"},
@@ -13,7 +13,7 @@ SATELLITES = [
     {"name": "Meteosat-12", "slider_id": "meteosat-12", "lon": 0.0, "cadence_min": 10, "ir_band": "band_13", "ts_seconds": "00"},
 ]
 
-USER_AGENT = "WeatherEventAnalyzer/1.0 (https://github.com/weather-event-analyzer)"
+_req = CachedRequest()
 
 
 def parse_location_input(text: str) -> Optional[tuple[float, float]]:
@@ -31,14 +31,8 @@ def parse_location_input(text: str) -> Optional[tuple[float, float]]:
 
 
 def geocode(query: str) -> tuple[float, float, str]:
-    resp = requests.get(
-        "https://nominatim.openstreetmap.org/search",
-        params={"q": query, "format": "json", "limit": 1},
-        headers={"User-Agent": USER_AGENT},
-        timeout=10,
-    )
-    resp.raise_for_status()
-    results = resp.json()
+    url = f"https://nominatim.openstreetmap.org/search?q={query}&format=json&limit=1"
+    results = _req.fetch_json(url, cache_key=f"json/geocode/{query}.json", ttl=86400)
     if not results:
         raise ValueError(f"Could not geocode: {query!r}")
     r = results[0]

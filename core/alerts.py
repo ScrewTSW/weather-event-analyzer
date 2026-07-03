@@ -17,9 +17,7 @@ from xml.etree import ElementTree as ET
 import requests
 
 from core.models.alerts.base import Alert, SourceResult
-
-USER_AGENT = "WeatherEventAnalyzer/1.0"
-RATE_LIMIT_DELAY = 0.3  # 300ms between requests to any single source
+from core.api_request import CachedRequest, USER_AGENT
 
 logger = logging.getLogger(__name__)
 
@@ -31,8 +29,8 @@ class GDACSClient:
     EVENT_TYPES = "EQ;FL;TC;VO;WF;DR"  # Earthquake, Flood, Cyclone, Volcano, Wildfire, Drought
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
+        self.req = CachedRequest()
+        self.session = self.req.session
 
     def fetch_current_alerts(self) -> SourceResult:
         """Fetch current active alerts (last 48 hours only)."""
@@ -58,8 +56,7 @@ class GDACSClient:
         }
 
         try:
-            time.sleep(RATE_LIMIT_DELAY)
-            resp = self.session.get(url, params=params, timeout=30)
+            resp = self.req.fetch_raw(url, params=params)
             resp.raise_for_status()
             data = resp.json()
 
@@ -134,8 +131,8 @@ class NWSClient:
     BASE_URL = "https://api.weather.gov/alerts"
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
+        self.req = CachedRequest()
+        self.session = self.req.session
 
     def fetch_current_alerts(self) -> SourceResult:
         """Fetch current active alerts with Extreme or Severe severity."""
@@ -143,8 +140,7 @@ class NWSClient:
         params = {"severity": "Extreme,Severe"}
 
         try:
-            time.sleep(RATE_LIMIT_DELAY)
-            resp = self.session.get(url, params=params, timeout=30)
+            resp = self.req.fetch_raw(url, params=params)
             resp.raise_for_status()
             data = resp.json()
 
@@ -202,8 +198,8 @@ class ESTOFEXClient:
     BASE_URL = "https://www.estofex.org/cgi-bin/polygon/showforecast.cgi"
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
+        self.req = CachedRequest()
+        self.session = self.req.session
 
     def fetch_current_alerts(self) -> SourceResult:
         """Fetch current convective forecast."""
@@ -211,8 +207,7 @@ class ESTOFEXClient:
         params = {"xml": "yes"}
 
         try:
-            time.sleep(RATE_LIMIT_DELAY)
-            resp = self.session.get(url, params=params, timeout=30)
+            resp = self.req.fetch_raw(url, params=params)
             resp.raise_for_status()
 
             alerts = self._parse_xml(resp.content)
@@ -284,8 +279,8 @@ class IBTrACSClient:
     HISTORICAL_URL = "https://www.ncei.noaa.gov/data/international-best-track-archive-for-climate-stewardship-ibtracs/v04r01/access/csv/ibtracs.last3years.list.v04r01.csv"
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
+        self.req = CachedRequest()
+        self.session = self.req.session
 
     def fetch_current_alerts(self) -> SourceResult:
         """Fetch currently active cyclones."""
@@ -300,8 +295,7 @@ class IBTrACSClient:
     def _fetch_from_url(self, url: str, from_date: Optional[str] = None, to_date: Optional[str] = None) -> SourceResult:
         """Fetch and parse IBTrACS CSV data."""
         try:
-            time.sleep(RATE_LIMIT_DELAY)
-            resp = self.session.get(url, timeout=30)
+            resp = self.req.fetch_raw(url)
             resp.raise_for_status()
 
             alerts = self._parse_csv(resp.text, from_date, to_date)
@@ -378,14 +372,13 @@ class PTWCClient:
     CAP_URL = "https://www.tsunami.gov/events/xml/PHEBCAP.xml"
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
+        self.req = CachedRequest()
+        self.session = self.req.session
 
     def fetch_current_alerts(self) -> SourceResult:
         """Fetch current tsunami alerts from PTWC CAP feed."""
         try:
-            time.sleep(RATE_LIMIT_DELAY)
-            resp = self.session.get(self.CAP_URL, timeout=30)
+            resp = self.req.fetch_raw(self.CAP_URL)
             resp.raise_for_status()
 
             alerts = self._parse_cap_xml(resp.content)
@@ -501,8 +494,8 @@ class SPCClient:
     HAIL_REPORTS_URL = "https://www.spc.noaa.gov/climo/reports/{date}_hail.csv"
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
+        self.req = CachedRequest()
+        self.session = self.req.session
 
     def fetch_tornado_reports(self, date: str) -> SourceResult:
         """Fetch tornado reports for a specific date (YYYY-MM-DD or 'today')."""
@@ -537,8 +530,7 @@ class SPCClient:
     def _fetch_reports(self, url: str, event_type: str) -> SourceResult:
         """Fetch and parse SPC storm reports CSV."""
         try:
-            time.sleep(RATE_LIMIT_DELAY)
-            resp = self.session.get(url, timeout=30)
+            resp = self.req.fetch_raw(url)
             resp.raise_for_status()
 
             alerts = self._parse_csv(resp.text, event_type, url)
@@ -615,16 +607,15 @@ class MeteoAlarmClient:
     FEED_URL = "https://feeds.meteoalarm.org/feeds/meteoalarm-legacy-atom-{country}"
 
     def __init__(self):
-        self.session = requests.Session()
-        self.session.headers["User-Agent"] = USER_AGENT
+        self.req = CachedRequest()
+        self.session = self.req.session
 
     def fetch_current_alerts(self, country: str = "germany") -> SourceResult:
         """Fetch current alerts for a specific European country."""
         url = self.FEED_URL.format(country=country.lower())
 
         try:
-            time.sleep(RATE_LIMIT_DELAY)
-            resp = self.session.get(url, timeout=30)
+            resp = self.req.fetch_raw(url)
             resp.raise_for_status()
 
             alerts = self._parse_atom_cap(resp.content)

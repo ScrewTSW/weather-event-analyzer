@@ -160,23 +160,13 @@ GIBS_BASE = "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best"
 GIBS_TILE_SIZE = 512
 
 
-def fetch_gibs_tile(session, layer, date, zoom, row, col, cache=None):
-    """Download a single NASA GIBS tile."""
+def fetch_gibs_tile(req, layer, date, zoom, row, col):
+    """Download a single NASA GIBS tile via CachedRequest."""
     cache_key = f"gibs/{layer}/{date}/{zoom}/{row}_{col}.jpg"
-    if cache:
-        cached = cache.get(cache_key)
-        if cached:
-            return Image.open(cached).convert("RGBA")
-
     url = f"{GIBS_BASE}/{layer}/default/{date}/250m/{zoom}/{row}/{col}.jpg"
-    try:
-        resp = session.get(url, timeout=15)
-        if resp.status_code == 200 and len(resp.content) > 1000:
-            if cache:
-                cache.store(cache_key, resp.content, source_url=url)
-            return Image.open(io.BytesIO(resp.content)).convert("RGBA")
-    except Exception:
-        pass
+    data = req.fetch_binary(url, cache_key=cache_key, rate_limit=0.05)
+    if data and len(data) > 1000:
+        return Image.open(io.BytesIO(data)).convert("RGBA")
     return None
 
 
@@ -189,9 +179,8 @@ def render_map_view(center_lat, center_lon, bbox_deg=20.0, date=None,
     if not HAS_CARTOPY:
         return Image.new("RGBA", output_size, (30, 30, 30, 255))
 
-    import requests
-    session = requests.Session()
-    session.headers["User-Agent"] = "WeatherEventAnalyzer/1.0"
+    from core.api_request import CachedRequest
+    req = CachedRequest(cache=cache)
 
     if date is None:
         from datetime import datetime
@@ -230,7 +219,7 @@ def render_map_view(center_lat, center_lon, bbox_deg=20.0, date=None,
         tiles_ok = 0
         for row in range(min_row, max_row + 1):
             for col in range(min_col, max_col + 1):
-                tile_img = fetch_gibs_tile(session, layer, date, gibs_zoom, row, col, cache)
+                tile_img = fetch_gibs_tile(req, layer, date, gibs_zoom, row, col)
                 if tile_img:
                     tile_lat_top = 90 - row * tile_height
                     tile_lat_bot = tile_lat_top - tile_height

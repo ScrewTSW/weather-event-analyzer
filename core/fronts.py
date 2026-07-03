@@ -199,12 +199,9 @@ def fetch_openmeteo_gridded(lat, lon, date, hour=12, bbox_deg=10, step=2.0):
         f"&past_days=7&wind_speed_unit=ms"
     )
 
-    session = requests.Session()
-    session.headers["User-Agent"] = "WeatherEventAnalyzer/1.0"
-    _time.sleep(0.3)
-    resp = session.get(url, timeout=120)
-    resp.raise_for_status()
-    data = resp.json()
+    from core.api_request import CachedRequest
+    req = CachedRequest()
+    data = req.fetch_json(url)
 
     target_time = f"{date}T{hour:02d}:00"
 
