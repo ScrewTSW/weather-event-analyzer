@@ -54,9 +54,10 @@ def select_sources(lat, lon):
 
 
 class MesoscaleDiscussionClient:
-    def __init__(self):
+    def __init__(self, cache=None):
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
+        self.cache = cache
 
     def fetch(self, lat, lon, date):
         sources = select_sources(lat, lon)
@@ -85,8 +86,16 @@ class MesoscaleDiscussionClient:
         return results
 
     def _fetch_spc_md(self):
+        cache_key = "json/discussion/spc_md_index.json"
         url = "https://www.spc.noaa.gov/products/md/"
         try:
+            cached_results = None
+            if self.cache:
+                cached_results = self.cache.get_json(cache_key, ttl=1800)
+
+            if cached_results:
+                return [Discussion(**d) for d in cached_results]
+
             time.sleep(0.3)
             resp = self.session.get(url, timeout=15)
             resp.raise_for_status()
@@ -109,41 +118,64 @@ class MesoscaleDiscussionClient:
                         title=title, text=text[:3000],
                         valid_from="", valid_to="", url=md_url,
                     ))
+
+            if self.cache and results:
+                serialized = [vars(d) for d in results]
+                self.cache.store_json(cache_key, serialized, source_url=url, ttl=1800)
+
             return results
         except Exception as e:
             logger.warning(f"SPC MD fetch failed: {e}")
             return []
 
     def _fetch_spc_outlook(self):
+        cache_key = "json/discussion/spc_outlook.json"
         url = "https://tgftp.nws.noaa.gov/data/raw/ac/acus01.kwns.swo.dy1.txt"
         try:
+            if self.cache:
+                cached = self.cache.get_json(cache_key, ttl=3600)
+                if cached:
+                    return [Discussion(**cached)]
+
             time.sleep(0.3)
             resp = self.session.get(url, timeout=15)
             if resp.status_code == 200:
-                return [Discussion(
+                result = Discussion(
                     source="spc_outlook", region="US",
                     title="SPC Day 1 Convective Outlook",
                     text=resp.text[:3000],
                     valid_from="", valid_to="",
                     url="https://www.spc.noaa.gov/products/outlook/day1otlk.html",
-                )]
+                )
+                if self.cache:
+                    self.cache.store_json(cache_key, vars(result), source_url=url, ttl=3600)
+                return [result]
         except Exception as e:
             logger.warning(f"SPC outlook fetch failed: {e}")
         return []
 
     def _fetch_estofex(self):
+        cache_key = "json/discussion/estofex.json"
         url = "https://www.estofex.org/cgi-bin/polygon/showforecast.cgi?text=yes"
         try:
+            if self.cache:
+                cached = self.cache.get_json(cache_key, ttl=7200)
+                if cached:
+                    return [Discussion(**cached)]
+
             time.sleep(0.3)
             resp = self.session.get(url, timeout=15)
             if resp.status_code == 200:
                 text = _clean_html(resp.text)
-                return [Discussion(
+                result = Discussion(
                     source="estofex", region="Europe",
                     title="ESTOFEX Convective Forecast",
                     text=text[:3000],
                     valid_from="", valid_to="", url=url,
-                )]
+                )
+                if self.cache:
+                    self.cache.store_json(cache_key, vars(result), source_url=url, ttl=7200)
+                return [result]
         except Exception as e:
             logger.warning(f"ESTOFEX fetch failed: {e}")
         return []

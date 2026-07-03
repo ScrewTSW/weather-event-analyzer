@@ -114,23 +114,40 @@ def _get_unit(var_name: str) -> str:
 
 
 class OpenMeteoClient:
-    def __init__(self):
+    def __init__(self, cache=None):
         self.session = requests.Session()
         self.session.headers["User-Agent"] = USER_AGENT
+        self.cache = cache
 
     def fetch_forecast(self, lat: float, lon: float, past_days: int = 7) -> AtmosphereData:
+        cache_key = f"json/atmosphere/forecast/{lat}_{lon}_{past_days}.json"
+        if self.cache:
+            cached = self.cache.get_json(cache_key, ttl=3600)
+            if cached:
+                return parse_openmeteo_response(cached, source="open-meteo-forecast")
         url = build_openmeteo_forecast_url(lat, lon, past_days)
         time.sleep(0.3)
         resp = self.session.get(url, timeout=15)
         resp.raise_for_status()
-        return parse_openmeteo_response(resp.json(), source="open-meteo-forecast")
+        raw = resp.json()
+        if self.cache:
+            self.cache.store_json(cache_key, raw, source_url=url, ttl=3600)
+        return parse_openmeteo_response(raw, source="open-meteo-forecast")
 
     def fetch_archive(self, lat: float, lon: float, date: str) -> AtmosphereData:
+        cache_key = f"json/atmosphere/archive/{lat}_{lon}_{date}.json"
+        if self.cache:
+            cached = self.cache.get_json(cache_key, ttl=86400)
+            if cached:
+                return parse_openmeteo_response(cached, source="open-meteo-archive")
         url = build_openmeteo_archive_url(lat, lon, date)
         time.sleep(0.3)
         resp = self.session.get(url, timeout=15)
         resp.raise_for_status()
-        return parse_openmeteo_response(resp.json(), source="open-meteo-archive")
+        raw = resp.json()
+        if self.cache:
+            self.cache.store_json(cache_key, raw, source_url=url, ttl=86400)
+        return parse_openmeteo_response(raw, source="open-meteo-archive")
 
     def fetch(self, lat: float, lon: float, date: str) -> AtmosphereData:
         # Try forecast first (has CAPE, 7-day lookback)

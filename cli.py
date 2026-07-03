@@ -128,7 +128,7 @@ def _run_atmosphere(args, cache):
 
     print(f"Location: {display}")
 
-    client = OpenMeteoClient()
+    client = OpenMeteoClient(cache=cache)
     data = client.fetch(lat, lon, args.date)
     print(f"Source: {data.source}")
     print(f"Timestamps: {len(data.timestamps)}")
@@ -149,7 +149,7 @@ def _run_atmosphere(args, cache):
             print(f"  Skipped {chart_type}: {e}")
 
     # Pressure-level charts
-    pressure_client = PressureLevelClient()
+    pressure_client = PressureLevelClient(cache=cache)
     try:
         profile = pressure_client.fetch_snapshot(lat, lon, args.date, 12)
         for name, fn in [("sounding", create_sounding_chart), ("hodograph", create_hodograph_chart)]:

@@ -101,9 +101,9 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
     cache_dir = Path(cache_dir) if cache_dir else default_cache_dir()
     cache = Cache(str(cache_dir), max_size_gb=cache_max_gb)
     sat_client = SatelliteClient(cache)
-    atmo_client = OpenMeteoClient()
-    pressure_client = PressureLevelClient()
-    discussion_client = MesoscaleDiscussionClient()
+    atmo_client = OpenMeteoClient(cache=cache)
+    pressure_client = PressureLevelClient(cache=cache)
+    discussion_client = MesoscaleDiscussionClient(cache=cache)
     frontal_analyzer = FrontalAnalyzer()
 
     state = {"composed_frames": [], "frame_labels": []}

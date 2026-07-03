@@ -244,3 +244,87 @@ class TestSatelliteE2E:
             assert f.image is not None
             assert f.source != ""
             assert f.layer != ""
+
+
+class TestCachingE2E:
+    """Verify caching: clean cache, fetch, assert cache grew, re-fetch, assert cache unchanged."""
+
+    def setup_method(self):
+        import tempfile
+        import shutil
+        from core.cache import Cache
+        self.cache_dir = tempfile.mkdtemp()
+        self.cache = Cache(self.cache_dir, max_size_gb=0.1)
+        self.cache.cleanup(max_age_hours=0)
+
+    def _json_count(self):
+        return self.cache.stats().get("json", {}).get("count", 0)
+
+    def _json_size(self):
+        return self.cache.stats().get("json", {}).get("size_bytes", 0)
+
+    def test_atmosphere_cache_hit(self):
+        from core.atmosphere import OpenMeteoClient
+        client = OpenMeteoClient(cache=self.cache)
+
+        before_count = self._json_count()
+        result1 = client.fetch(42.3, -83.0, "2026-07-02")
+        assert isinstance(result1, AtmosphereData)
+        after_count = self._json_count()
+        assert after_count > before_count, "Cache should grow after first fetch"
+
+        result2 = client.fetch(42.3, -83.0, "2026-07-02")
+        assert isinstance(result2, AtmosphereData)
+        assert self._json_count() == after_count, "Cache should not grow on cache hit"
+        assert result2.source == result1.source
+        assert len(result2.timestamps) == len(result1.timestamps)
+
+    def test_pressure_levels_cache_hit(self):
+        from core.pressure_levels import PressureLevelClient
+        client = PressureLevelClient(cache=self.cache)
+
+        before_count = self._json_count()
+        result1 = client.fetch_snapshot(42.3, -83.0, "2026-07-02", 12)
+        assert isinstance(result1, PressureLevelSnapshot)
+        after_count = self._json_count()
+        assert after_count > before_count
+
+        result2 = client.fetch_snapshot(42.3, -83.0, "2026-07-02", 12)
+        assert self._json_count() == after_count
+        assert result2.synoptic_time == result1.synoptic_time
+
+    def test_discussions_cache_hit(self):
+        from core.discussions import MesoscaleDiscussionClient
+        client = MesoscaleDiscussionClient(cache=self.cache)
+
+        before_count = self._json_count()
+        result1 = client.fetch(35.0, -97.0, "2026-07-02")
+        assert isinstance(result1, list)
+        after_count = self._json_count()
+        assert after_count > before_count
+
+        result2 = client.fetch(35.0, -97.0, "2026-07-02")
+        assert self._json_count() == after_count
+        if result1:
+            assert result2[0].title == result1[0].title
+
+    def test_cache_persists_across_instances(self):
+        from core.atmosphere import OpenMeteoClient
+        from core.cache import Cache
+        client = OpenMeteoClient(cache=self.cache)
+        client.fetch(42.3, -83.0, "2026-07-02")
+        size_before = self._json_size()
+        assert size_before > 0
+
+        cache2 = Cache(self.cache_dir, max_size_gb=0.1)
+        assert cache2.stats().get("json", {}).get("size_bytes", 0) == size_before
+
+    def test_cached_data_preserves_types(self):
+        from core.atmosphere import OpenMeteoClient
+        client = OpenMeteoClient(cache=self.cache)
+        fresh = client.fetch(42.3, -83.0, "2026-07-02")
+        cached = client.fetch(42.3, -83.0, "2026-07-02")
+        assert type(fresh) == type(cached)
+        for var_name in fresh.variables:
+            assert var_name in cached.variables
+            assert type(fresh.variables[var_name]) == type(cached.variables[var_name])
