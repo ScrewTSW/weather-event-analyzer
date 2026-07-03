@@ -79,12 +79,4 @@ class TestParseOpenMeteoResponse:
         assert result.variables["cape"].data == [450.0, 380.0]
 
 
-class TestAtmosphereIntegration:
-    @pytest.mark.integration
-    def test_fetch_forecast_has_cape(self):
-        client = OpenMeteoClient()
-        result = client.fetch_forecast(45.75, 126.65, past_days=1)
-        assert result.source == "open-meteo-forecast"
-        assert "cape" in result.variables
-        cape_data = result.variables["cape"].data
-        assert any(v is not None for v in cape_data)
+    # Real API integration tests moved to tests/test_e2e_integration.py
