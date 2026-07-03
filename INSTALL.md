@@ -15,7 +15,8 @@ python -m pip install -r requirements.txt
 | `Pillow` | Image handling — tile stitching, cropping, labeling, GIF assembly |
 | `numpy` | Array operations for atmospheric data and image manipulation |
 | `matplotlib` | Atmosphere charts (CAPE/CIN, temperature, wind) and radar PPI plots |
-| `scipy` | Bilinear interpolation for regridding atmospheric data onto satellite imagery |
+| `scipy` | Interpolation (PCHIP for soundings, cubic for hodographs, Gaussian for fronts) |
+| `metpy` | Meteorological calculations — Skew-T, hodograph, CAPE/CIN, Bunkers motion, SRH |
 | `gradio` | Web UI framework — the interactive browser interface |
 | `arm_pyart` | NEXRAD Level 2 radar data parsing (reflectivity + velocity volume scans) |
 | `nexradaws` | AWS S3 interface for querying and downloading NEXRAD radar files |
