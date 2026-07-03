@@ -245,7 +245,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 discussions = discussion_client.fetch(lat, lon, date)
                 disc_text = ""
                 for d in discussions:
-                    disc_text += f"### {d.title} ({d.source})\n\n{d.text}\n\n---\n\n"
+                    disc_text += f"=== {d.title} ({d.source}) ===\n\n{d.text}\n\n{'─' * 60}\n\n"
                 if not disc_text:
                     disc_text = "No mesoscale discussions available for this region."
                 log(f"Found {len(discussions)} discussion(s)")
@@ -315,7 +315,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                       timeline=gr.HTML(value=0, labels_json=json.dumps(labels), frame_count=len(labels)),
                       info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
                       sounding=sounding, hodo=hodo, discussion=disc_text,
-                      synoptic_label=synoptic_label, progress=progress_html("Ready", 100))
+                      synoptic_label=synoptic_label, progress=progress_html(f"Ready — {synoptic_label}", 100))
 
         except Exception as e:
             import traceback
@@ -358,6 +358,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                     padding:0 !important; margin:0 !important; }
     #wea-progress > div { border-radius:0 !important; }
     .gradio-container { padding-top:32px !important; }
+    #wea-discussion textarea { height:560px !important; min-height:560px !important; }
     </style>
     """
 
@@ -477,11 +478,12 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 hodo_plot = gr.Image(label="Hodograph", type="pil",
                                      show_label=False, height=560)
             with gr.Column(scale=1):
-                synoptic_label = gr.Textbox(label="Synoptic Time", interactive=False, lines=1)
+                synoptic_label = gr.Textbox(visible=False)
                 gr.HTML(f'<div style="margin-bottom:2px"><b>Mesoscale Discussion</b> {TIP_DISC}</div>')
-                discussion_box = gr.Markdown(
+                discussion_box = gr.Textbox(
                     label="Mesoscale Discussion", value="",
-                    height=500, show_label=False,
+                    lines=30, max_lines=100, interactive=False,
+                    show_label=False, elem_id="wea-discussion",
                 )
 
         gr.HTML(f'<div style="margin:8px 0 4px"><b>Active Severe Weather Alerts</b> {TIP_ALERTS}</div>')
