@@ -110,18 +110,21 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
 
     def fetch_data(location_str, date, start_utc, end_utc, zoom, product, show_fronts):
         log_lines = []
-        # outputs: image, timeline_html, cape, temp, wind, info, log, alerts, sounding, hodo, discussion, synoptic_label
-        empty = (None, "", None, None, None, "", "", [], None, None, "", "")
+        # outputs: image, timeline_html, cape, temp, wind, info, log, alerts, sounding, hodo, discussion, synoptic_label, progress
+        empty = (None, "", None, None, None, "", "", [], None, None, "", "", "")
 
         def log(msg):
             log_lines.append(msg)
+
+        def progress_html(text, pct):
+            return f'<div style="position:relative;background:#222;border-radius:6px;height:28px;overflow:hidden"><div style="background:#2a7a3a;height:100%;width:{pct}%;transition:width 0.3s"></div><div style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;font-weight:bold">{text}</div></div>'
 
         def out(**kw):
             base = list(empty)
             base[6] = "\n".join(log_lines)
             mapping = {"image": 0, "timeline": 1, "cape": 2, "temp": 3, "wind": 4,
                        "info": 5, "alerts": 7, "sounding": 8, "hodo": 9,
-                       "discussion": 10, "synoptic_label": 11}
+                       "discussion": 10, "synoptic_label": 11, "progress": 12}
             for k, v in kw.items():
                 base[mapping[k]] = v
             return tuple(base)
@@ -142,13 +145,13 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             end_utc = (end_utc or "").strip() or now.strftime("%H:%M")
 
             log("Resolving location...")
-            yield out()
+            yield out(progress=progress_html("Resolving location...", 5))
 
             lat, lon, display, satellite = resolve_location(location_str)
             info = f"{display}\n{satellite['name']} ({satellite['slider_id']})"
             log(f"Location: {display}")
             log(f"Satellite: {satellite['name']}")
-            yield out(info=info)
+            yield out(info=info, progress=progress_html("Resolving location...", 5))
 
             def _fig_to_pil(fig):
                 buf = io.BytesIO()
@@ -161,33 +164,37 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
 
             # 1. Atmosphere (fast)
             log("Fetching atmosphere...")
-            yield out(info=info)
+            yield out(info=info, progress=progress_html("Fetching atmospheric data...", 15))
             atmo = atmo_client.fetch(lat, lon, date)
             log(f"Atmosphere: {atmo.source} ({len(atmo.timestamps)}h)")
+            log("Rendering charts...")
+            yield out(info=info, progress=progress_html("Rendering charts...", 25))
             cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin"))
             temp = _fig_to_pil(create_atmosphere_chart(atmo, "temp_dewpoint"))
             wind = _fig_to_pil(create_atmosphere_chart(atmo, "wind"))
-            yield out(info=info, cape=cape, temp=temp, wind=wind)
+            yield out(info=info, cape=cape, temp=temp, wind=wind, progress=progress_html("Rendering charts...", 25))
 
             # 2. Alerts (fast)
             log("Fetching alerts...")
-            yield out(info=info, cape=cape, temp=temp, wind=wind)
+            yield out(info=info, cape=cape, temp=temp, wind=wind, progress=progress_html("Fetching alerts...", 60))
             sc = start_utc.replace(":", ""); ec = end_utc.replace(":", "")
             mid = str((int(sc) + int(ec)) // 2).zfill(4)
             alerts_raw = fetch_alerts(lat, lon, f"{date}T{mid[:2]}:{mid[2:]}:00")
             log(f"Found {len(alerts_raw)} alerts")
             alerts_data = _format_alerts(alerts_raw)
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
+            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Fetching alerts...", 60))
 
             # 3. Pressure-level data (sounding, hodograph, helicity)
             log("Fetching pressure-level data...")
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data)
+            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Fetching pressure-level data...", 35))
             sc_h = int(start_utc.replace(":", "")[:2]) if start_utc else 12
             synoptic_h = snap_to_synoptic(sc_h)
             synoptic_label = f"Synoptic time: {synoptic_h:02d}Z {date}"
 
             try:
                 profile = pressure_client.fetch_snapshot(lat, lon, date, sc_h)
+                log("Rendering sounding & hodograph...")
+                yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Rendering sounding & hodograph...", 50))
                 sounding = _fig_to_pil(create_sounding_chart(profile))
                 hodo = _fig_to_pil(create_hodograph_chart(profile))
                 log(f"Sounding/Hodograph: {profile.source} ({synoptic_h:02d}Z)")
@@ -204,12 +211,12 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 log(f"Helicity computation failed: {e}")
 
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
-                      sounding=sounding, hodo=hodo, synoptic_label=synoptic_label)
+                      sounding=sounding, hodo=hodo, synoptic_label=synoptic_label, progress=progress_html("Rendering sounding & hodograph...", 50))
 
             # 4. Mesoscale discussions
             log("Fetching mesoscale discussions...")
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
-                      sounding=sounding, hodo=hodo, synoptic_label=synoptic_label)
+                      sounding=sounding, hodo=hodo, synoptic_label=synoptic_label, progress=progress_html("Fetching mesoscale discussions...", 70))
             try:
                 discussions = discussion_client.fetch(lat, lon, date)
                 disc_text = ""
@@ -224,7 +231,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
 
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
                       sounding=sounding, hodo=hodo, discussion=disc_text,
-                      synoptic_label=synoptic_label)
+                      synoptic_label=synoptic_label, progress=progress_html("Fetching mesoscale discussions...", 70))
 
             # 5. Frontal analysis (optional)
             bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
@@ -233,7 +240,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 log("Running frontal analysis...")
                 yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
                           sounding=sounding, hodo=hodo, discussion=disc_text,
-                          synoptic_label=synoptic_label)
+                          synoptic_label=synoptic_label, progress=progress_html("Analyzing frontal boundaries...", 75))
                 try:
                     detected_fronts = frontal_analyzer.fetch_and_analyze(
                         lat, lon, date, run_hour=f"{synoptic_h:02d}",
@@ -248,7 +255,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             log(f"Fetching satellite imagery (bbox={bbox_deg}°)...")
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
                       sounding=sounding, hodo=hodo, discussion=disc_text,
-                      synoptic_label=synoptic_label)
+                      synoptic_label=synoptic_label, progress=progress_html("Loading satellite imagery...", 80))
 
             frames = sat_client.fetch_event(
                 lat=lat, lon=lon, date=date_c, start_utc=sc, end_utc=ec,
@@ -256,6 +263,10 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 on_progress=log,
             )
             log(f"Got {len(frames)} frames")
+            log("Compositing satellite frames...")
+            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
+                      sounding=sounding, hodo=hodo, discussion=disc_text,
+                      synoptic_label=synoptic_label, progress=progress_html("Compositing satellite frames...", 90))
 
             composed, labels = [], []
             for i, f in enumerate(frames):
@@ -270,7 +281,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                     yield out(image=img, timeline=gr.HTML(value=0, labels_json=json.dumps(labels), frame_count=len(labels)),
                               info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
                               sounding=sounding, hodo=hodo, discussion=disc_text,
-                              synoptic_label=synoptic_label)
+                              synoptic_label=synoptic_label, progress=progress_html("Compositing satellite frames...", 90))
 
             state["composed_frames"] = composed
             state["frame_labels"] = labels
@@ -279,7 +290,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                       timeline=gr.HTML(value=0, labels_json=json.dumps(labels), frame_count=len(labels)),
                       info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
                       sounding=sounding, hodo=hodo, discussion=disc_text,
-                      synoptic_label=synoptic_label)
+                      synoptic_label=synoptic_label, progress=progress_html("Ready", 100))
 
         except Exception as e:
             import traceback
@@ -296,8 +307,8 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         frames = state["composed_frames"]
         labels = state["frame_labels"]
         if not frames or idx >= len(frames):
-            return (None, gr.skip()) + tuple(gr.skip() for _ in range(10))
-        return (frames[idx], gr.HTML(value=idx, labels_json=json.dumps(labels), frame_count=len(labels))) + tuple(gr.skip() for _ in range(10))
+            return (None, gr.skip()) + tuple(gr.skip() for _ in range(11))
+        return (frames[idx], gr.HTML(value=idx, labels_json=json.dumps(labels), frame_count=len(labels))) + tuple(gr.skip() for _ in range(11))
 
     TOOLTIP_CSS = """
     <style>
@@ -316,6 +327,11 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
     .wea-tip .wea-tt::after { content:""; position:absolute; top:100%; left:50%;
                margin-left:-6px; border-width:6px; border-style:solid;
                border-color:#1a1a2e transparent transparent transparent; }
+    #wea-progress { position:fixed !important; top:0 !important; left:0 !important;
+                    right:0 !important; z-index:9999 !important;
+                    padding:0 !important; margin:0 !important; }
+    #wea-progress > div { border-radius:0 !important; }
+    .gradio-container { padding-top:32px !important; }
     </style>
     """
 
@@ -375,6 +391,11 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
     with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
         gr.HTML(TOOLTIP_CSS)
+
+        progress_bar = gr.HTML(
+            value='<div style="position:relative;background:#222;border-radius:6px;height:28px;overflow:hidden"><div style="background:#2a7a3a;height:100%;width:0%;transition:width 0.3s"></div><div style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#ccc;font-weight:bold">Ready</div></div>',
+            elem_id="wea-progress",
+        )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -450,7 +471,8 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                     zoom_slider, product_dd, fronts_checkbox],
             outputs=[sat_image, timeline, cape_plot, temp_plot, wind_plot,
                      resolved, status_log, alerts_table,
-                     sounding_plot, hodo_plot, discussion_box, synoptic_label],
+                     sounding_plot, hodo_plot, discussion_box, synoptic_label,
+                     progress_bar],
             show_progress="hidden",
         )
         timeline.change(
@@ -458,7 +480,8 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             inputs=[timeline],
             outputs=[sat_image, timeline, cape_plot, temp_plot, wind_plot,
                      resolved, status_log, alerts_table,
-                     sounding_plot, hodo_plot, discussion_box, synoptic_label],
+                     sounding_plot, hodo_plot, discussion_box, synoptic_label,
+                     progress_bar],
             show_progress="hidden",
         )
 
