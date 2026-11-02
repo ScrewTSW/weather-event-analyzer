@@ -196,7 +196,7 @@ class CachedRequest:
         return text
 
     def fetch_raw(self, url: str, params: dict = None,
-                  timeout: int = 30) -> requests.Response:
+                  timeout: int = 10) -> requests.Response:
         """Raw HTTP GET — for XML/CSV/binary responses that need custom parsing.
         Still goes through the shared session (User-Agent) and tracks stats."""
         self._rate_limit(url)
@@ -227,9 +227,17 @@ class CachedRequest:
                 self.stats.record_cache_hit()
                 return path.read_bytes()
 
-        self._rate_limit(url)
-        self.stats.record_api_call(self._domain(url))
-        resp = self.session.get(url, timeout=30)
+        # One retry on transient network failure — large WMS renders (GIBS
+        # 2048px PNG ≈ 9.5 MB) occasionally stall server-side past the timeout.
+        for attempt in range(2):
+            self._rate_limit(url)
+            self.stats.record_api_call(self._domain(url))
+            try:
+                resp = self.session.get(url, timeout=30)
+                break
+            except (requests.Timeout, requests.ConnectionError):
+                if attempt == 1:
+                    raise
         if resp.status_code == 200 and len(resp.content) > 500:
             if cache_key and self.cache:
                 self.cache.store(cache_key, resp.content, source_url=url)

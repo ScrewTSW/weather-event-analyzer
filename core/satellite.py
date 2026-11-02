@@ -1,42 +1,20 @@
 import io
 import math
-from pathlib import Path
+import numpy as np
+import requests
+from datetime import datetime, timedelta, timezone
 from typing import Optional
-
-from core.models import SatelliteFrame
-from core.api_request import CachedRequest
 
 from PIL import Image
 
 from core.cache import Cache
+from core.api_request import CachedRequest
+from core.models.satellite.base import SatelliteFrame
+from core.models.satellite.source import SatelliteSource, SOURCES, select_source
+
 GIBS_WMTS = "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best"
 GIBS_WMS = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
 EUMETSAT_WMS = "https://view.eumetsat.int/geoserver/wms"
-
-SOURCES = {
-    "goes_east": {"type": "gibs_wmts", "layer": "GOES-East_ABI_Band13_Clean_Infrared", "matrix": "500m", "max_zoom": 6, "cadence_min": 10},
-    "goes_west": {"type": "gibs_wmts", "layer": "GOES-West_ABI_Band13_Clean_Infrared", "matrix": "500m", "max_zoom": 6, "cadence_min": 10},
-    "goes_east_geocolor": {"type": "gibs_wms", "layer": "GOES-East_ABI_GeoColor", "cadence_min": 10},
-    "goes_west_geocolor": {"type": "gibs_wms", "layer": "GOES-West_ABI_GeoColor", "cadence_min": 10},
-    "himawari": {"type": "gibs_wmts", "layer": "Himawari_AHI_Band13_Clean_Infrared", "matrix": "500m", "max_zoom": 6, "cadence_min": 10},
-    "himawari_truecolor": {"type": "gibs_wms", "layer": "Himawari_AHI_Band3_Red_Visible_1km", "cadence_min": 10},
-    "meteosat_ir": {"type": "eumetsat_wms", "layer": "msg_fes:ir108", "cadence_min": 15},
-    "meteosat_vis": {"type": "eumetsat_wms", "layer": "msg_fes:vis006", "cadence_min": 15},
-    "modis_terra": {"type": "gibs_wmts", "layer": "MODIS_Terra_CorrectedReflectance_TrueColor", "matrix": "250m", "max_zoom": 8, "cadence_min": 1440},
-    "viirs": {"type": "gibs_wmts", "layer": "VIIRS_SNPP_CorrectedReflectance_TrueColor", "matrix": "250m", "max_zoom": 8, "cadence_min": 1440},
-}
-
-
-def select_source(lat: float, lon: float, product: str = "auto") -> tuple[str, dict]:
-    if product != "auto" and product in SOURCES:
-        return product, SOURCES[product]
-    if -125 <= lon <= -30:
-        return "goes_east_geocolor", SOURCES["goes_east_geocolor"]
-    if -180 <= lon <= -125 or 150 <= lon <= 180:
-        return "goes_west_geocolor", SOURCES["goes_west_geocolor"]
-    if 90 <= lon < 150:
-        return "himawari", SOURCES["himawari"]
-    return "meteosat_ir", SOURCES["meteosat_ir"]
 
 
 def _gibs_wmts_tile_url(layer: str, matrix: str, time_str: str, z: int, row: int, col: int) -> str:
@@ -44,53 +22,33 @@ def _gibs_wmts_tile_url(layer: str, matrix: str, time_str: str, z: int, row: int
 
 
 def _gibs_wms_url(layer: str, time_str: str, bbox: tuple, width: int = 512, height: int = 512) -> str:
-    west, south, east, north = bbox
     return (
-        f"{GIBS_WMS}?SERVICE=WMS&VERSION=1.1.1&REQUEST=GetMap"
-        f"&LAYERS={layer}&FORMAT=image/jpeg&TRANSPARENT=true"
+        f"{GIBS_WMS}?SERVICE=WMS&VERSION=1.3.0&REQUEST=GetMap"
+        f"&LAYERS={layer}&FORMAT=image/png&TRANSPARENT=true"
+        f"&CRS=EPSG:4326&BBOX={bbox[1]},{bbox[0]},{bbox[3]},{bbox[2]}"
         f"&WIDTH={width}&HEIGHT={height}&SRS=EPSG:4326"
-        f"&BBOX={west},{south},{east},{north}&TIME={time_str}"
+        f"&TIME={time_str}"
     )
 
 
 def _eumetsat_wms_url(layer: str, bbox: tuple, width: int = 512, height: int = 512, time_str: str = None) -> str:
-    west, south, east, north = bbox
     url = (
         f"{EUMETSAT_WMS}?service=WMS&version=1.1.1&request=GetMap"
-        f"&layers={layer}&format=image/jpeg"
+        f"&layers={layer}&format=image/png&transparent=true"
+        f"&bbox={bbox[0]},{bbox[1]},{bbox[2]},{bbox[3]}"
         f"&width={width}&height={height}&srs=EPSG:4326"
-        f"&bbox={west},{south},{east},{north}"
     )
     if time_str:
         url += f"&time={time_str}"
     return url
 
 
-def _generate_timestamps(date: str, start_utc: str, end_utc: str, cadence_min: int) -> list[str]:
-    from datetime import datetime, timedelta
-    start_h, start_m = int(start_utc[:2]), int(start_utc[2:4]) if len(start_utc) > 2 else 0
-    end_h, end_m = int(end_utc[:2]), int(end_utc[2:4]) if len(end_utc) > 2 else 0
-    base = datetime.strptime(date, "%Y%m%d")
-    start_dt = base.replace(hour=start_h, minute=start_m)
-    end_dt = base.replace(hour=end_h, minute=end_m)
-    if end_dt <= start_dt:
-        end_dt += timedelta(days=1)
-
-    start_dt = start_dt.replace(minute=(start_dt.minute // cadence_min) * cadence_min)
-    timestamps = []
-    t = start_dt
-    while t <= end_dt:
-        timestamps.append(t.strftime("%Y-%m-%dT%H:%M:%SZ"))
-        t += timedelta(minutes=cadence_min)
-    return timestamps
-
-
 class SatelliteClient:
+    OUTPUT_SIZE = 2048
+
     def __init__(self, cache: Cache):
         self.cache = cache
         self.req = CachedRequest(cache=cache)
-
-    OUTPUT_SIZE = 2048
 
     def _fetch_image(self, url: str, cache_key: str) -> Optional[Image.Image]:
         data = self.req.fetch_binary(url, cache_key=cache_key)
@@ -103,42 +61,49 @@ class SatelliteClient:
             return img
         return img.resize((self.OUTPUT_SIZE, self.OUTPUT_SIZE), Image.LANCZOS)
 
-    def fetch_wms_image(self, source: dict, time_str: str, lat: float, lon: float,
-                        bbox_deg: float = 20.0, size: int = 1024) -> Optional[Image.Image]:
+    @staticmethod
+    def _has_content(img: Image.Image, threshold: float = 8.0) -> bool:
+        return np.array(img).mean() > threshold
+
+    def _build_url(self, source: SatelliteSource, ts: str, lat: float, lon: float,
+                   bbox_deg: float, size: int) -> tuple[str, str]:
         half = bbox_deg / 2
         north = min(lat + half, 65.0)
         south = max(lat - half, -65.0)
         bbox = (lon - half, south, lon + half, north)
-        src_type = source["type"]
-        layer = source["layer"]
 
-        if src_type == "gibs_wms":
-            url = _gibs_wms_url(layer, time_str, bbox, size, size)
-        elif src_type == "eumetsat_wms":
-            url = _eumetsat_wms_url(layer, bbox, size, size, time_str=time_str)
+        if source.source_type == "gibs_wms":
+            url = _gibs_wms_url(source.layer, ts, bbox, size, size)
+            cache_key = f"wms/{source.layer}/{ts.replace(':', '')}/" \
+                        f"{lat:.2f}_{lon:.2f}_{bbox_deg}_{size}.jpg"
+        elif source.source_type == "eumetsat_wms":
+            url = _eumetsat_wms_url(source.layer, bbox, size, size, time_str=ts)
+            cache_key = f"wms/{source.layer}/{ts.replace(':', '')}/" \
+                        f"{lat:.2f}_{lon:.2f}_{bbox_deg}_{size}.jpg"
         else:
-            return None
+            return None, None
+        return url, cache_key
 
-        cache_key = f"wms/{layer}/{time_str.replace(':', '')}/{lat:.2f}_{lon:.2f}_{bbox_deg}.jpg"
+    def _fetch_wms(self, source: SatelliteSource, ts: str, lat: float, lon: float,
+                   bbox_deg: float, size: int) -> Optional[Image.Image]:
+        url, cache_key = self._build_url(source, ts, lat, lon, bbox_deg, size)
+        if not url:
+            return None
         return self._fetch_image(url, cache_key)
 
-    def fetch_wmts_tiles(self, source: dict, time_str: str, lat: float, lon: float,
-                         bbox_deg: float = 20.0, zoom: int = 4) -> Optional[Image.Image]:
-        layer = source["layer"]
-        matrix = source.get("matrix", "250m")
-        max_z = source.get("max_zoom", 6)
-        z = min(zoom, max_z)
-
+    def _fetch_wmts(self, source: SatelliteSource, ts: str, lat: float, lon: float,
+                    bbox_deg: float, zoom: int) -> Optional[Image.Image]:
         half = bbox_deg / 2
-        n_rows = 2 ** z
-        n_cols = 2 ** (z + 1)
-        tile_h = 180.0 / n_rows
-        tile_w = 360.0 / n_cols
+        lat_min = max(lat - half, -85)
+        lat_max = min(lat + half, 85)
+        lon_min = lon - half
+        lon_max = lon + half
 
-        min_row = max(0, int((90 - (lat + half)) / tile_h))
-        max_row = min(n_rows - 1, int((90 - (lat - half)) / tile_h))
-        min_col = max(0, int((lon - half + 180) / tile_w))
-        max_col = min(n_cols - 1, int((lon + half + 180) / tile_w))
+        n = 2 ** zoom
+        min_row = max(0, int((90 - lat_max) / (180 / n)))
+        max_row = min(n - 1, int((90 - lat_min) / (180 / n)))
+        min_col = max(0, int((lon_min + 180) / (360 / (2 * n))))
+        max_col = min(2 * n - 1, int((lon_max + 180) / (360 / (2 * n))))
 
         width = (max_col - min_col + 1) * 512
         height = (max_row - min_row + 1) * 512
@@ -146,8 +111,8 @@ class SatelliteClient:
 
         for row in range(min_row, max_row + 1):
             for col in range(min_col, max_col + 1):
-                url = _gibs_wmts_tile_url(layer, matrix, time_str, z, row, col)
-                cache_key = f"wmts/{layer}/{time_str.replace(':', '')}/{z}/{row}_{col}.png"
+                url = _gibs_wmts_tile_url(source.layer, source.matrix, ts, zoom, row, col)
+                cache_key = f"wmts/{source.layer}/{ts.replace(':', '')}/{zoom}/{row}_{col}.png"
                 tile = self._fetch_image(url, cache_key)
                 if tile:
                     x = (col - min_col) * 512
@@ -156,51 +121,102 @@ class SatelliteClient:
 
         return composite
 
-    def probe_latest(self, lat: float, lon: float, product: str = "auto",
-                     bbox_deg: float = 20.0) -> str | None:
-        """Find the latest available satellite frame by probing backward from now."""
-        from datetime import datetime, timedelta, timezone
-        source_name, source = select_source(lat, lon, product)
-        cadence = source.get("cadence_min", 15)
-        now = datetime.now(timezone.utc).replace(tzinfo=None)
-        # Snap to cadence grid
-        snapped = now.replace(minute=(now.minute // cadence) * cadence, second=0, microsecond=0)
-
-        for offset in range(0, 12):  # Try up to 2 hours back
-            probe_time = snapped - timedelta(minutes=offset * cadence)
-            ts = probe_time.strftime("%Y-%m-%dT%H:%M:%SZ")
-            if source["type"] in ("gibs_wms", "eumetsat_wms"):
-                img = self.fetch_wms_image(source, ts, lat, lon, bbox_deg, size=256)
-            else:
-                img = self.fetch_wmts_tiles(source, ts, lat, lon, bbox_deg, zoom=2)
-            if img:
-                return ts
+    def _probe_frame(self, source: SatelliteSource, ts: str, lat: float, lon: float,
+                     bbox_deg: float) -> Optional[Image.Image]:
+        """Fetch a small uncached image just to check if data exists."""
+        half = bbox_deg / 2
+        bbox = (lon - half, max(lat - half, -65.0), lon + half, min(lat + half, 65.0))
+        if source.source_type == "gibs_wms":
+            url = _gibs_wms_url(source.layer, ts, bbox, 128, 128)
+        elif source.source_type == "eumetsat_wms":
+            url = _eumetsat_wms_url(source.layer, bbox, 128, 128, time_str=ts)
+        else:
+            url = _gibs_wmts_tile_url(source.layer, source.matrix, ts, 2, 0, 0)
+        try:
+            resp = self.req.fetch_raw(url)
+            if resp.status_code == 200 and len(resp.content) > 500:
+                return Image.open(io.BytesIO(resp.content)).convert("RGBA")
+        except Exception:
+            pass
         return None
 
-    def fetch_event(self, lat: float, lon: float, date: str, start_utc: str, end_utc: str,
+    def _fetch_frame(self, source: SatelliteSource, ts: str, lat: float, lon: float,
+                     bbox_deg: float, zoom: int, size: int) -> Optional[Image.Image]:
+        if source.source_type in ("gibs_wms", "eumetsat_wms"):
+            return self._fetch_wms(source, ts, lat, lon, bbox_deg, size)
+        else:
+            return self._fetch_wmts(source, ts, lat, lon, bbox_deg, zoom)
+
+    def probe_latest(self, source: SatelliteSource, lat: float, lon: float,
+                     bbox_deg: float = 20.0, on_progress=None) -> str | None:
+        """Walk backward from estimated latest, verify actual pixel content."""
+        estimated = source.estimate_latest()
+        cadence = timedelta(minutes=source.cadence_min)
+
+        for offset in range(18):  # Up to 3 hours back
+            probe_time = estimated - (cadence * offset)
+            ts = probe_time.strftime("%Y-%m-%dT%H:%M:%SZ")
+            img = self._probe_frame(source, ts, lat, lon, bbox_deg)
+            if img and self._has_content(img):
+                if on_progress:
+                    on_progress(f"Latest valid frame: {ts}")
+                return ts
+            if on_progress:
+                on_progress(f"Probing {ts}... empty")
+        return None
+
+    def fetch_event(self, lat: float, lon: float, date: str = None,
+                    start_utc: str = None, end_utc: str = None,
                     product: str = "auto", zoom: int = 4, bbox_deg: float = 20.0,
-                    on_progress=None) -> list:
-        source_name, source = select_source(lat, lon, product)
-        cadence = source.get("cadence_min", 15)
+                    on_progress=None) -> list[SatelliteFrame]:
+        source = select_source(lat, lon, product)
 
         if on_progress:
-            on_progress(f"Source: {source_name} ({source['layer']})")
+            on_progress(f"Source: {source.name} ({source.layer})")
 
-        timestamps = _generate_timestamps(date, start_utc, end_utc, cadence)
+        if date and start_utc and end_utc:
+            start_h = int(start_utc.replace(":", "")[:2])
+            start_m = int(start_utc.replace(":", "")[2:4]) if len(start_utc.replace(":", "")) > 2 else 0
+            end_h = int(end_utc.replace(":", "")[:2])
+            end_m = int(end_utc.replace(":", "")[2:4]) if len(end_utc.replace(":", "")) > 2 else 0
+            base = datetime.strptime(date, "%Y%m%d")
+            start_dt = base.replace(hour=start_h, minute=start_m)
+            end_dt = base.replace(hour=end_h, minute=end_m)
+            if end_dt <= start_dt:
+                end_dt += timedelta(days=1)
+            timestamps = source.generate_timestamps(start_dt, end_dt)
+        else:
+            latest = self.probe_latest(source, lat, lon, bbox_deg, on_progress)
+            if not latest:
+                if on_progress:
+                    on_progress("No valid frames found")
+                return []
+            end_dt = datetime.fromisoformat(latest.replace("Z", ""))
+            start_dt = end_dt - timedelta(hours=2)
+            timestamps = source.generate_timestamps(start_dt, end_dt)
+
         if on_progress:
-            on_progress(f"Generated {len(timestamps)} timestamps ({cadence}-min intervals)")
+            on_progress(f"Generated {len(timestamps)} timestamps ({source.cadence_min}-min intervals)")
 
         results = []
+        failed = 0
         stats_before = self.req.stats.cache_hits
         for i, ts in enumerate(timestamps):
             hits_before = self.req.stats.cache_hits
-
-            if source["type"] in ("gibs_wms", "eumetsat_wms"):
-                img = self.fetch_wms_image(source, ts, lat, lon, bbox_deg, size=self.OUTPUT_SIZE)
-            else:
-                img = self.fetch_wmts_tiles(source, ts, lat, lon, bbox_deg, zoom)
-
+            try:
+                img = self._fetch_frame(source, ts, lat, lon, bbox_deg, zoom, self.OUTPUT_SIZE)
+            except requests.RequestException as e:
+                if on_progress:
+                    on_progress(f"FAILED {i+1}/{len(timestamps)}: {ts} ({type(e).__name__})")
+                failed += 1
+                continue
             was_cached = self.req.stats.cache_hits > hits_before
+
+            if img and not self._has_content(img):
+                if on_progress:
+                    on_progress(f"SKIP {i+1}/{len(timestamps)}: {ts} (empty)")
+                continue
+
             tag = "CACHE" if was_cached else "PULLED"
             if on_progress:
                 on_progress(f"{tag} {i+1}/{len(timestamps)}: {ts}")
@@ -214,15 +230,15 @@ class SatelliteClient:
                     lon + half,
                 )
                 results.append(SatelliteFrame(
-                    source=source_name,
+                    source=source.name,
                     timestamp=ts,
                     image=self._normalize(img),
-                    layer=source["layer"],
+                    layer=source.layer,
                     bbox=frame_bbox,
                 ))
 
         cache_hits = self.req.stats.cache_hits - stats_before
-        api_calls = len(timestamps) - cache_hits
+        api_calls = len(timestamps) - cache_hits - failed
         if on_progress:
-            on_progress(f"Got {len(results)} frames ({cache_hits} CACHE, {api_calls} PULLED)")
+            on_progress(f"Got {len(results)} frames ({cache_hits} CACHE, {api_calls} PULLED, {failed} FAILED)")
         return results

@@ -16,6 +16,11 @@ SATELLITES = [
 _req = CachedRequest()
 
 
+def init_cache(cache):
+    global _req
+    _req = CachedRequest(cache=cache)
+
+
 def parse_location_input(text: str) -> Optional[tuple[float, float]]:
     text = text.strip()
     parts = text.split(",")
