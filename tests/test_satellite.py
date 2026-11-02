@@ -42,6 +42,20 @@ class TestFetchEventResilience:
         assert [f.timestamp for f in frames] == ["2026-11-02T15:00:00Z", "2026-11-02T15:20:00Z"]
         assert any("FAILED 2/3" in line for line in logs)
 
+    @patch('core.api_request.requests.Session.get')
+    def test_iter_frames_yields_before_fetching_the_rest(self, mock_get):
+        mock_get.side_effect = [_png_response(), _png_response(), _png_response()]
+        source, timestamps = self.client.plan_event(
+            lat=37.69, lon=-97.33, date="20261102", start_utc="1500", end_utc="1520",
+            product="goes_east_geocolor", bbox_deg=20.0)
+
+        frames = self.client.iter_frames(source, timestamps, 37.69, -97.33, bbox_deg=20.0)
+        first = next(frames)
+
+        assert first.timestamp == "2026-11-02T15:00:00Z"
+        assert mock_get.call_count == 1  # the app can show frame 1 while 2..n download
+        assert [f.timestamp for f in frames] == ["2026-11-02T15:10:00Z", "2026-11-02T15:20:00Z"]
+
 
 class TestFetchBinaryRetry:
     def setup_method(self):

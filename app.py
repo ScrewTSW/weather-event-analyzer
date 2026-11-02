@@ -1,5 +1,7 @@
 # app.py
 import json
+import re
+import tempfile
 from pathlib import Path
 
 import io
@@ -18,13 +20,32 @@ from core.alerts import fetch_alerts
 from core.visualize import create_atmosphere_chart, add_timestamp_label, add_geo_overlay
 from core.pressure_levels import PressureLevelClient, snap_to_synoptic, extract_snapshot
 from core.visualize import create_sounding_chart, create_hodograph_chart
+from core.visualize import create_timelapse_webp, create_timelapse_gif
 from core.discussions import MesoscaleDiscussionClient
 from core.fronts import FrontalAnalyzer, find_pressure_extrema
 
 
+# The notches are part of the template: Gradio re-renders it whenever a prop
+# changes (every slider move sets props.value), which wiped JS-built notches.
 TIMELINE_HTML_TEMPLATE = """
 <div style="background:#1a1a2e;border-radius:8px;padding:8px 12px 4px">
-    <div id="tl-notches" style="display:flex;align-items:flex-end"></div>
+    <div id="tl-notches" style="display:flex;align-items:flex-end">${(() => {
+        let labels = [];
+        try { labels = JSON.parse(labels_json || '[]'); } catch (e) {}
+        const cur = value || 0;
+        return labels.map((ts, i) => {
+            const parts = ts.replace(' UTC', '').split(' ');
+            const time = (parts[parts.length - 1] || '').slice(0, 5);
+            const dp = parts.length > 1 ? parts[0].split('-') : [];
+            const isCur = i === cur;
+            const color = isCur ? '#FFD700' : '#888';
+            const date = (isCur || i === 0) && dp.length === 3
+                ? `<div style="font-size:9px;color:#555">${dp[1]}/${dp[2]}</div>` : '';
+            return `<div style="flex:1;text-align:center">${date}`
+                + `<div style="font-size:11px;color:${color};font-weight:${isCur ? 'bold' : 'normal'}">${time}</div>`
+                + `<div style="width:2px;height:${isCur ? 16 : 10}px;background:${color};margin:2px auto"></div></div>`;
+        }).join('');
+    })()}</div>
     <div style="height:1px;background:#444;margin:0"></div>
     <input type="range" min="0" max="${Math.max(0,(frame_count||1)-1)}"
            value="${value||0}" step="1" id="tl-slider"
@@ -38,64 +59,69 @@ TIMELINE_CSS = """
 """
 
 TIMELINE_JS = """
-function renderNotches() {
-    var c = element.querySelector('#tl-notches');
-    if (!c) return;
-    var labels = [];
-    try { labels = JSON.parse(props.labels_json || '[]'); } catch(e) {}
-    c.innerHTML = '';
-    labels.forEach(function(ts, i) {
-        var parts = ts.replace(' UTC','').split(' ');
-        var timePart = parts.length > 1 ? parts[parts.length-1] : ts;
-        var dp = parts[0] ? parts[0].split('-') : [];
-        var shortDate = dp.length === 3 ? dp[1]+'/'+dp[2] : '';
-        var isCur = (i === (props.value||0));
-        var color = isCur ? '#FFD700' : '#888';
-        var weight = isCur ? 'bold' : 'normal';
-        var dateHtml = (isCur || i === 0) ? '<div style=\"font-size:9px;color:#555\">'+shortDate+'</div>' : '';
-        var d = document.createElement('div');
-        d.style.cssText = 'flex:1;text-align:center';
-        d.innerHTML = dateHtml +
-            '<div style=\"font-size:11px;color:'+color+';font-weight:'+weight+'\">'+timePart+'</div>' +
-            '<div style=\"width:2px;height:'+(isCur?16:10)+'px;background:'+color+';margin:2px auto\"></div>';
-        c.appendChild(d);
-    });
+// Delegated on `element`: the slider node is replaced on every re-render
+function setFrame(v) {
+    if (v === (props.value || 0)) return;
+    props.value = v;
+    trigger('change', {frame_index: v});
 }
 
-var slider = element.querySelector('#tl-slider');
-slider.addEventListener('input', function(e) {
-    props.value = parseInt(e.target.value);
-    renderNotches();
-    trigger('change', {frame_index: props.value});
+element.addEventListener('input', function(e) {
+    if (e.target.id === 'tl-slider') setFrame(parseInt(e.target.value));
 });
 
 document.addEventListener('keydown', function(e) {
-    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight') {
-        var s = element.querySelector('#tl-slider');
-        if (!s || s.disabled) return;
-        var mx = parseInt(s.max);
-        var v = parseInt(s.value);
-        if (e.key === 'ArrowLeft') v = Math.max(0, v-1);
-        else v = Math.min(mx, v+1);
-        s.value = v;
-        props.value = v;
-        renderNotches();
-        trigger('change', {frame_index: v});
-    }
-});
-
-watch(['value','labels_json','frame_count'], function() {
+    if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+    var t = e.target;
+    // The focused slider steps itself (and fires 'input'); text fields keep their arrows
+    if (t && (t.id === 'tl-slider' || t.isContentEditable ||
+              /^(INPUT|TEXTAREA|SELECT)$/.test(t.tagName))) return;
     var s = element.querySelector('#tl-slider');
-    if (s) {
-        s.max = Math.max(0, (props.frame_count||1)-1);
-        s.value = props.value||0;
-        s.disabled = (props.frame_count||0) <= 1;
-    }
-    renderNotches();
+    if (!s || s.disabled) return;
+    var v = parseInt(s.value) + (e.key === 'ArrowLeft' ? -1 : 1);
+    setFrame(Math.max(0, Math.min(parseInt(s.max), v)));
 });
-
-renderNotches();
 """
+
+# fetch_data output order — must match the fetch_btn.click outputs list
+FETCH_OUTPUTS = ("image", "timeline", "cape", "temp", "wind", "info", "log", "alerts",
+                 "sounding", "hodo", "discussion", "synoptic_label", "progress")
+# Outputs that show the stopwatch placeholder until their first result arrives
+PENDING_OUTPUTS = ("image", "cape", "temp", "wind", "sounding", "hodo", "discussion", "alerts")
+
+# Animation export: label -> (extension, resize to px or None, writer).
+# GIF is halved — at 2048 px and 256 colours it runs ~4x the size of the WebP.
+EXPORT_FORMATS = {
+    "WebP (2048 px)": ("webp", None, create_timelapse_webp),
+    "GIF (1024 px)": ("gif", 1024, create_timelapse_gif),
+}
+
+# Animated stopwatch over an output that is still being prepared: the face
+# (crown + dial) is an SVG on ::before, the sweeping hand is ::after.
+PENDING_CSS = """
+.wea-pending { position:relative; min-height:120px; }
+.wea-pending > * { opacity:0.25; transition:opacity 0.3s; }
+.wea-pending::before, .wea-pending::after {
+    content:""; position:absolute; left:50%; top:50%; z-index:20; pointer-events:none; }
+.wea-pending::before {
+    width:64px; height:72px; transform:translate(-32px,-40px);
+    background:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='64' height='72' viewBox='0 0 64 72'%3E%3Crect x='27' y='0' width='10' height='6' rx='2' fill='%23FFD700'/%3E%3Crect x='30' y='5' width='4' height='5' fill='%23FFD700'/%3E%3Ccircle cx='32' cy='40' r='27' fill='%231a1a2e' stroke='%23FFD700' stroke-width='4'/%3E%3Cg stroke='%23888' stroke-width='2'%3E%3Cline x1='32' y1='17' x2='32' y2='22'/%3E%3Cline x1='55' y1='40' x2='50' y2='40'/%3E%3Cline x1='32' y1='63' x2='32' y2='58'/%3E%3Cline x1='9' y1='40' x2='14' y2='40'/%3E%3C/g%3E%3Ccircle cx='32' cy='40' r='3' fill='%23FFD700'/%3E%3C/svg%3E") no-repeat; }
+.wea-pending::after {
+    width:3px; height:20px; margin-left:-1.5px; margin-top:-20px; border-radius:2px;
+    background:#FFD700; transform-origin:50% 100%;
+    animation:wea-sweep 2s steps(16) infinite; }
+@keyframes wea-sweep { from { transform:rotate(0deg); } to { transform:rotate(360deg); } }
+"""
+
+
+def _fig_to_pil(fig):
+    import matplotlib.pyplot as plt
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', bbox_inches='tight',
+                facecolor=fig.get_facecolor(), edgecolor='none')
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf).convert("RGB")
 
 
 def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
@@ -109,12 +135,11 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
     frontal_analyzer = FrontalAnalyzer()
 
     state = {"composed_frames": [], "frame_labels": [], "profile_hourly": None,
-             "sounding_by_hour": {}, "hodo_by_hour": {}}
+             "sounding_by_hour": {}, "hodo_by_hour": {},
+             "shown_idx": None, "shown_hour": None}
 
     def fetch_data(location_str, date, start_utc, end_utc, zoom, product, show_fronts):
         log_lines = []
-        # outputs: image, timeline_html, cape, temp, wind, info, log, alerts, sounding, hodo, discussion, synoptic_label, progress
-        empty = (None, "", None, None, None, "", "", [], None, None, "", "", "")
 
         import logging
         _file_logger = logging.getLogger("wea")
@@ -131,16 +156,34 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         def progress_html(text, pct):
             return f'<div style="position:relative;background:#222;border-radius:6px;height:28px;overflow:hidden"><div style="background:#2a7a3a;height:100%;width:{pct}%;transition:width 0.3s"></div><div style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;font-weight:bold">{text}</div></div>'
 
-        last_state = list(empty)
-        mapping = {"image": 0, "timeline": 1, "cape": 2, "temp": 3, "wind": 4,
-                   "info": 5, "alerts": 7, "sounding": 8, "hodo": 9,
-                   "discussion": 10, "synoptic_label": 11, "progress": 12}
+        # Only outputs passed to out() are sent; the rest are gr.skip() so
+        # charts and 2048 px frames aren't re-sent on every progress tick.
+        # Outputs in `pending` show the stopwatch until their first value.
+        pending = set(PENDING_OUTPUTS)
 
-        def out(**kw):
-            for k, v in kw.items():
-                last_state[mapping[k]] = v
-            last_state[6] = "\n".join(log_lines)
-            return tuple(last_state)
+        def out(progress=None, clear_pending=False, **kw):
+            row = []
+            for name in FETCH_OUTPUTS:
+                if name in kw:
+                    v = kw[name]
+                    if name in pending:
+                        pending.discard(name)
+                        v = gr.update(value=v, elem_classes=[])
+                    row.append(v)
+                elif name == "log":
+                    row.append("\n".join(log_lines))
+                elif name == "progress" and progress is not None:
+                    row.append(progress)
+                elif clear_pending and name in pending:
+                    row.append(gr.update(elem_classes=[]))
+                else:
+                    row.append(gr.skip())
+            if clear_pending:
+                pending.clear()
+            return tuple(row)
+
+        def step(text, pct, **kw):
+            return out(progress=progress_html(text, pct), **kw)
 
         try:
             from datetime import datetime, timedelta
@@ -153,6 +196,21 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             if not location_str or not location_str.strip():
                 log("ERROR: Enter a location"); yield out(); return
 
+            # Clear the previous run and put every output on the stopwatch
+            composed, labels = [], []
+            state.update(composed_frames=composed, frame_labels=labels,
+                         profile_hourly=None, sounding_by_hour={}, hodo_by_hour={},
+                         shown_idx=None, shown_hour=None)
+            blank = {"image": None, "cape": None, "temp": None, "wind": None,
+                     "sounding": None, "hodo": None, "discussion": "", "alerts": []}
+            yield tuple(
+                gr.update(value=blank[n], elem_classes=["wea-pending"]) if n in blank
+                else gr.HTML(value=0, labels_json="[]", frame_count=0) if n == "timeline"
+                else "" if n == "log"
+                else progress_html("Resolving location...", 5) if n == "progress"
+                else gr.skip()
+                for n in FETCH_OUTPUTS)
+
             date = (date or "").strip()
             start_utc = (start_utc or "").strip()
             end_utc = (end_utc or "").strip()
@@ -160,20 +218,18 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             date = date or now.strftime("%Y-%m-%d")
 
             log("Resolving location...")
-            yield out(progress=progress_html("Resolving location...", 5))
-
             lat, lon, display, satellite = resolve_location(location_str)
             info = f"{display}\n{satellite['name']} ({satellite['slider_id']})"
             log(f"Location: {display}")
             log(f"Satellite: {satellite['name']}")
-            yield out(info=info, progress=progress_html("Resolving location...", 5))
+            yield step("Resolving location...", 5, info=info)
 
             bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
 
             # Probe for latest available satellite frame when using live mode
             if is_live:
                 log("Probing for latest satellite data...")
-                yield out(info=info, progress=progress_html("Probing latest satellite data...", 8))
+                yield step("Probing latest satellite data...", 8)
                 from core.models.satellite.source import select_source as _select_src
                 _sat_source = _select_src(lat, lon, product)
                 latest = sat_client.probe_latest(_sat_source, lat, lon, bbox_deg=bbox_deg, on_progress=log)
@@ -192,38 +248,30 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 start_utc = start_utc or (now - timedelta(hours=2)).strftime("%H:%M")
                 end_utc = end_utc or now.strftime("%H:%M")
 
-            def _fig_to_pil(fig):
-                buf = io.BytesIO()
-                fig.savefig(buf, format='png', bbox_inches='tight',
-                            facecolor=fig.get_facecolor(), edgecolor='none')
-                import matplotlib.pyplot as plt
-                plt.close(fig)
-                buf.seek(0)
-                return Image.open(buf).convert("RGB")
-
-            # 1. Atmosphere (fast)
-            yield out(info=info, progress=progress_html("Fetching atmospheric data...", 15))
+            # 1. Atmosphere (fast) — each chart is sent as soon as it renders
+            yield step("Fetching atmospheric data...", 12)
             h_before = atmo_client.req.stats.cache_hits
             atmo = atmo_client.fetch(lat, lon, date)
             atmo_tag = "CACHE" if atmo_client.req.stats.cache_hits > h_before else "PULLED"
             log(f"{atmo_tag} atmosphere: {atmo.source} ({len(atmo.timestamps)}h)")
-            yield out(info=info, progress=progress_html("Rendering charts...", 25))
+            yield step("Rendering CAPE / CIN...", 15)
             cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin"))
-            temp = _fig_to_pil(create_atmosphere_chart(atmo, "temp_dewpoint"))
-            wind = _fig_to_pil(create_atmosphere_chart(atmo, "wind"))
+            yield step("Rendering temperature / dewpoint...", 18, cape=cape)
+            yield step("Rendering wind...", 21,
+                       temp=_fig_to_pil(create_atmosphere_chart(atmo, "temp_dewpoint")))
+            yield step("Fetching pressure-level data...", 24,
+                       wind=_fig_to_pil(create_atmosphere_chart(atmo, "wind")))
             log("Rendered time-series charts")
-            yield out(info=info, cape=cape, temp=temp, wind=wind, progress=progress_html("Rendering charts...", 25))
 
-            alerts_data = []
             sc = start_utc.replace(":", ""); ec = end_utc.replace(":", "")
+            place = re.sub(r"[^A-Za-z0-9]+", "-", display.split(",")[0]).strip("-") or "location"
+            state["export_name"] = f"{place}_{date}_{sc}-{ec}UTC"
 
             # 2. Pressure-level data (sounding, hodograph, helicity)
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Fetching pressure-level data...", 35))
-            sc_h = int(start_utc.replace(":", "")[:2]) if start_utc else 12
+            sc_h = int(sc[:2]) if sc else 12
             synoptic_h = snap_to_synoptic(sc_h)
             synoptic_label = f"Sounding time: {synoptic_h:02d}:00 UTC"
 
-            profile_hourly = None
             try:
                 h_before = pressure_client.req.stats.cache_hits
                 profile_hourly = pressure_client.fetch_hourly(lat, lon, date)
@@ -231,40 +279,43 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 log(f"{hourly_tag} pressure hourly ({len(profile_hourly.timestamps)}h)")
                 state["profile_hourly"] = profile_hourly
 
-                yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Pre-rendering soundings...", 45))
-
-                sounding_by_hour = {}
-                hodo_by_hour = {}
-                snap_idx = 0
+                hours = []
                 for i, ts in enumerate(profile_hourly.timestamps):
                     try:
-                        h = int(ts.split("T")[1].split(":")[0])
+                        hours.append((int(ts.split("T")[1].split(":")[0]), i))
                     except (ValueError, IndexError):
                         continue
+                # Synoptic hour first so it is on screen while the rest render
+                hours.sort(key=lambda hi: hi[0] != synoptic_h)
+
+                sounding_by_hour = state["sounding_by_hour"]
+                hodo_by_hour = state["hodo_by_hour"]
+                for n, (h, i) in enumerate(hours):
                     profile = extract_snapshot(profile_hourly, i)
                     sounding_by_hour[h] = _fig_to_pil(create_sounding_chart(profile))
+                    if n == 0:
+                        state["shown_hour"] = h
+                        synoptic_label = f"Sounding time: {h:02d}:00 UTC"
+                        yield step("Rendering hodograph...", 30,
+                                   sounding=sounding_by_hour[h], synoptic_label=synoptic_label)
                     hodo_by_hour[h] = _fig_to_pil(create_hodograph_chart(profile))
-                    if f"T{synoptic_h:02d}:" in ts:
-                        snap_idx = i
-                state["sounding_by_hour"] = sounding_by_hour
-                state["hodo_by_hour"] = hodo_by_hour
-                sounding = sounding_by_hour.get(synoptic_h)
-                hodo = hodo_by_hour.get(synoptic_h)
+                    if n == 0:
+                        yield step("Adding helicity to CAPE / CIN...", 33, hodo=hodo_by_hour[h])
+                        cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin", profile_hourly=profile_hourly))
+                        has_cape = "cape" in atmo.variables
+                        log("Helicity added to CAPE/CIN chart" + ("" if has_cape else " (CAPE computed from profiles)"))
+                        yield step(f"Pre-rendering soundings 1/{len(hours)}...", 36, cape=cape)
+                    else:
+                        yield step(f"Pre-rendering soundings {n + 1}/{len(hours)}...",
+                                   36 + 24 * (n + 1) // len(hours))
                 log(f"Pre-rendered {len(sounding_by_hour)} soundings & hodographs")
-
-                cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin", profile_hourly=profile_hourly))
-                has_cape = "cape" in atmo.variables
-                log("Helicity added to CAPE/CIN chart" + ("" if has_cape else " (CAPE computed from profiles)"))
             except Exception as e:
                 log(f"Sounding/Hodograph failed: {e}")
-                sounding, hodo = None, None
+            # Stop the stopwatch even if nothing rendered
+            yield step("Fetching mesoscale discussions...", 62,
+                       **{k: None for k in ("sounding", "hodo") if k in pending})
 
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
-                      sounding=sounding, hodo=hodo, synoptic_label=synoptic_label, progress=progress_html("Rendering sounding & hodograph...", 50))
-
-            # 4. Mesoscale discussions
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
-                      sounding=sounding, hodo=hodo, synoptic_label=synoptic_label, progress=progress_html("Fetching mesoscale discussions...", 70))
+            # 3. Mesoscale discussions
             try:
                 h_before = discussion_client.req.stats.cache_hits
                 discussions = discussion_client.fetch(lat, lon, date)
@@ -279,19 +330,14 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             except Exception as e:
                 log(f"Discussions failed: {e}")
                 disc_text = "Failed to fetch mesoscale discussions."
+            yield step("Detecting pressure centers...", 68, discussion=disc_text)
 
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
-                      sounding=sounding, hodo=hodo, discussion=disc_text,
-                      synoptic_label=synoptic_label, progress=progress_html("Fetching mesoscale discussions...", 70))
-
-            # 5. Frontal analysis + pressure extrema
+            # 4. Frontal analysis + pressure extrema
             detected_fronts = None
             pressure_extrema = None
             if show_fronts:
                 log("Running frontal analysis...")
-                yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
-                          sounding=sounding, hodo=hodo, discussion=disc_text,
-                          synoptic_label=synoptic_label, progress=progress_html("Analyzing frontal boundaries...", 75))
+                yield step("Analyzing frontal boundaries...", 70)
                 try:
                     detected_fronts = frontal_analyzer.fetch_and_analyze(
                         lat, lon, date, run_hour=f"{synoptic_h:02d}",
@@ -309,85 +355,67 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             except Exception as e:
                 log(f"Pressure extrema failed: {e}")
 
-            # 6. Satellite imagery (pre-projected tiles from GIBS/EUMETSAT)
+            # 5. Satellite imagery — each frame is composited and shown as it
+            #    arrives, and the timeline grows a node per frame
             date_c = date.replace("-", "")
             log(f"Fetching satellite imagery (bbox={bbox_deg}°)...")
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
-                      sounding=sounding, hodo=hodo, discussion=disc_text,
-                      synoptic_label=synoptic_label, progress=progress_html("Loading satellite imagery...", 80))
-
-            frames = sat_client.fetch_event(
+            yield step("Loading satellite imagery...", 72)
+            source, timestamps = sat_client.plan_event(
                 lat=lat, lon=lon, date=date_c, start_utc=sc, end_utc=ec,
-                product=product, zoom=int(zoom), bbox_deg=bbox_deg,
-                on_progress=log,
-            )
-            log(f"Got {len(frames)} frames")
-            log("Compositing satellite frames...")
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
-                      sounding=sounding, hodo=hodo, discussion=disc_text,
-                      synoptic_label=synoptic_label, progress=progress_html("Compositing satellite frames...", 90))
+                product=product, bbox_deg=bbox_deg, on_progress=log)
 
-            # Render coastlines/borders overlay once, composite onto each frame
+            # Coastlines/borders rendered once (on the first frame), composited onto each
             from core.visualize import render_geo_overlay
             geo_overlay = None
-            if frames:
-                log("Rendering geo overlay...")
-                geo_overlay = render_geo_overlay(
-                    frames[0].image.width, frames[0].image.height,
-                    lat, lon, bbox_deg=bbox_deg, fronts=detected_fronts,
-                    pressure_extrema=pressure_extrema)
-                log(f"Geo overlay rendered ({geo_overlay.width}x{geo_overlay.height})")
-
-            composed, labels = [], []
-            for i, f in enumerate(frames):
-                ts = f.timestamp
-                label = ts.replace("T", " ").replace("Z", " UTC")
-                img = f.image.convert("RGBA")
-                if geo_overlay:
-                    img = Image.alpha_composite(img, geo_overlay)
+            for f in sat_client.iter_frames(source, timestamps, lat, lon, zoom=int(zoom),
+                                            bbox_deg=bbox_deg, on_progress=log):
+                if geo_overlay is None:
+                    log("Rendering geo overlay...")
+                    geo_overlay = render_geo_overlay(
+                        f.image.width, f.image.height,
+                        lat, lon, bbox_deg=bbox_deg, fronts=detected_fronts,
+                        pressure_extrema=pressure_extrema)
+                    log(f"Geo overlay rendered ({geo_overlay.width}x{geo_overlay.height})")
+                label = f.timestamp.replace("T", " ").replace("Z", " UTC")
+                img = Image.alpha_composite(f.image.convert("RGBA"), geo_overlay)
                 img = add_timestamp_label(img, label, f.source, display)
                 composed.append(img)
                 labels.append(label)
-                if i == 0:
-                    yield out(image=img, timeline=gr.HTML(value=0, labels_json=json.dumps(labels), frame_count=len(labels)),
-                              info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
-                              sounding=sounding, hodo=hodo, discussion=disc_text,
-                              synoptic_label=synoptic_label, progress=progress_html("Compositing satellite frames...", 90))
+                idx = len(composed) - 1
+                state["shown_idx"] = idx  # the timeline.change this triggers must not resend it
+                done = timestamps.index(f.timestamp) + 1
+                yield step(f"Satellite frames {done}/{len(timestamps)}...",
+                           72 + 23 * done // len(timestamps),
+                           image=img,
+                           timeline=gr.HTML(value=idx, labels_json=json.dumps(labels),
+                                            frame_count=len(labels)))
 
-            state["composed_frames"] = composed
-            state["frame_labels"] = labels
-            last_idx = len(composed) - 1 if composed else 0
-            yield out(image=composed[last_idx] if composed else None,
-                      timeline=gr.HTML(value=last_idx, labels_json=json.dumps(labels), frame_count=len(labels)),
-                      info=info, cape=cape, temp=temp, wind=wind,
-                      sounding=sounding, hodo=hodo, discussion=disc_text,
-                      synoptic_label=synoptic_label, progress=progress_html("Fetching alerts...", 95))
-
-            # 7. Alerts (last — slowest due to multiple external sources)
+            # 6. Alerts (last — slowest due to multiple external sources)
             log("Fetching alerts...")
+            yield step("Fetching alerts...", 95, **({"image": None} if "image" in pending else {}))
             mid = str((int(sc) + int(ec)) // 2).zfill(4)
             _alerts_cache_before = cache.stats().get("json", {}).get("count", 0) if cache else 0
             alerts_raw = fetch_alerts(lat, lon, f"{date}T{mid[:2]}:{mid[2:]}:00", cache=cache)
             _alerts_cache_after = cache.stats().get("json", {}).get("count", 0) if cache else 0
             alert_tag = "CACHE" if _alerts_cache_after == _alerts_cache_before else "PULLED"
             log(f"{alert_tag} {len(alerts_raw)} alerts")
-            alerts_data = _format_alerts(alerts_raw)
 
             log("Done.")
-            yield out(image=composed[last_idx] if composed else None,
-                      timeline=gr.HTML(value=last_idx, labels_json=json.dumps(labels), frame_count=len(labels)),
-                      info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
-                      sounding=sounding, hodo=hodo, discussion=disc_text,
-                      synoptic_label=synoptic_label, progress=progress_html(f"Ready — {synoptic_label}", 100))
+            yield step(f"Ready — {synoptic_label}", 100, alerts=_format_alerts(alerts_raw))
 
         except Exception as e:
             import traceback
             log_lines.append(f"ERROR: {e}\n{traceback.format_exc()}")
             error_bar = f'<div style="position:relative;background:#4a1111;border-radius:6px;height:28px;overflow:hidden"><div style="background:#8b0000;height:100%;width:100%"></div><div style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#fff;font-weight:bold">Error: {str(e)[:80]}</div></div>'
-            yield out(progress=error_bar)
+            yield out(progress=error_bar, clear_pending=True)
 
     def on_frame_change(timeline_value, evt: gr.EventData = None):
-        """Called when the timeline slider triggers 'change' via JS trigger()."""
+        """Called when the timeline slider triggers 'change' via JS trigger().
+
+        Also fires when fetch_data moves the timeline while streaming frames,
+        so anything already on screen is skipped instead of re-sent.
+        """
+        skip = gr.skip()
         try:
             idx = int(timeline_value) if timeline_value is not None else 0
         except (ValueError, TypeError):
@@ -395,30 +423,46 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         frames = state["composed_frames"]
         labels = state["frame_labels"]
         if not frames or idx >= len(frames):
-            return (None,) + tuple(gr.skip() for _ in range(11))
+            return (skip,) * 4
+
+        frame_out = skip if idx == state["shown_idx"] else frames[idx]
+        state["shown_idx"] = idx
 
         sounding_map = state.get("sounding_by_hour", {})
         hodo_map = state.get("hodo_by_hour", {})
         if sounding_map and idx < len(labels):
-            frame_label = labels[idx]
-            parts = frame_label.strip().split(" ")
+            parts = labels[idx].strip().split(" ")
             time_part = parts[-2] if len(parts) >= 2 else "12:00"
             try:
                 frame_h = int(time_part.split(":")[0])
             except (ValueError, IndexError):
                 frame_h = 12
 
-            available = sorted(sounding_map.keys())
-            best_h = min(available, key=lambda h: abs(h - frame_h)) if available else frame_h
+            best_h = min(sounding_map, key=lambda h: abs(h - frame_h))
+            if best_h != state["shown_hour"] and best_h in hodo_map:
+                state["shown_hour"] = best_h
+                return (frame_out, sounding_map[best_h], hodo_map[best_h],
+                        f"Sounding time: {best_h:02d}:00 UTC")
 
-            sounding_img = sounding_map.get(best_h)
-            hodo_img = hodo_map.get(best_h)
-            syn_label = f"Sounding time: {best_h:02d}:00 UTC"
-            return (frames[idx], gr.skip(), gr.skip(), gr.skip(),
-                    gr.skip(), gr.skip(), gr.skip(),
-                    sounding_img, hodo_img, gr.skip(), syn_label, gr.skip())
+        return (frame_out, skip, skip, skip)
 
-        return (frames[idx],) + tuple(gr.skip() for _ in range(11))
+    def export_animation(fmt):
+        """Write the composed satellite frames as an animated WebP or GIF for download."""
+        frames = list(state["composed_frames"])
+        if len(frames) < 2:
+            gr.Warning("Fetch at least two satellite frames first.")
+            return gr.update(value=None, visible=False)
+        ext, size, writer = EXPORT_FORMATS[fmt]
+        if size:
+            frames = [f.resize((size, size), Image.LANCZOS) for f in frames]
+        # One reused directory — Gradio copies the file into its own cache on return
+        export_dir = Path(tempfile.gettempdir()) / "wea-export"
+        export_dir.mkdir(exist_ok=True)
+        for old in export_dir.glob("*"):
+            old.unlink(missing_ok=True)
+        path = export_dir / f"{state.get('export_name', 'satellite')}.{ext}"
+        writer(frames, str(path), fps=4)
+        return gr.update(value=str(path), visible=True)
 
     TOOLTIP_CSS = """
     <style>
@@ -516,7 +560,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
 
     with gr.Blocks(title="Weather Event Analyzer") as app:
         gr.Markdown("# Weather Event Analyzer")
-        gr.HTML(TOOLTIP_CSS)
+        gr.HTML(TOOLTIP_CSS + f"<style>{PENDING_CSS}</style>")
 
         with gr.Column(elem_id="wea-fixed-bar"):
             progress_bar = gr.HTML(
@@ -555,6 +599,11 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 gr.HTML(f'<div style="margin-bottom:4px"><b>Satellite Imagery</b> {TIP_SAT}</div>')
                 sat_image = gr.Image(label="Satellite Imagery", type="pil", height=520,
                                      show_label=False)
+                with gr.Row(equal_height=True):
+                    export_fmt = gr.Radio(list(EXPORT_FORMATS), value="WebP (2048 px)",
+                                          show_label=False, container=False, scale=2)
+                    export_btn = gr.Button("Export animation", size="sm", scale=1)
+                export_file = gr.File(label="Animation", visible=False, interactive=False)
 
         gr.HTML(f'<h3 style="margin:12px 0 4px">Time Series</h3>')
         with gr.Row():
@@ -607,11 +656,13 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         timeline.change(
             fn=on_frame_change,
             inputs=[timeline],
-            outputs=[sat_image, cape_plot, temp_plot, wind_plot,
-                     resolved, status_log, alerts_table,
-                     sounding_plot, hodo_plot, discussion_box, synoptic_label,
-                     progress_bar],
+            outputs=[sat_image, sounding_plot, hodo_plot, synoptic_label],
             show_progress="hidden",
+        )
+        export_btn.click(
+            fn=export_animation,
+            inputs=[export_fmt],
+            outputs=[export_file],
         )
 
     return app

@@ -109,6 +109,16 @@ def add_timestamp_label(img, timestamp, satellite, location):
     return result
 
 
+
+# Bright red with a dark outline — yellow vanished against cloud tops
+CROSSHAIR_COLOR = '#FF1A1A'
+
+
+def _plot_location_crosshair(ax, lon, lat, transform, markersize=12):
+    ax.plot(lon, lat, '+', color=CROSSHAIR_COLOR, markersize=markersize,
+            markeredgewidth=2.5, transform=transform, zorder=10,
+            path_effects=[PathEffects.withStroke(linewidth=4.5, foreground='black')])
+
 def add_location_marker(img, center_x, center_y, color=(0, 255, 255, 255), size=None):
     """Add a crosshair marker at the specified location.
 
@@ -237,8 +247,7 @@ def render_map_view(center_lat, center_lon, bbox_deg=20.0, date=None,
     ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5, zorder=5)
     ax.add_feature(cfeature.LAKES, facecolor='none', edgecolor='cyan', linewidth=0.3, alpha=0.4, zorder=5)
 
-    ax.plot(center_lon, center_lat, '+', color='yellow', markersize=14,
-            markeredgewidth=2, transform=map_crs, zorder=10)
+    _plot_location_crosshair(ax, center_lon, center_lat, map_crs, markersize=14)
 
     buf = io.BytesIO()
     fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0,
@@ -272,8 +281,7 @@ def render_geo_overlay(width, height, center_lat, center_lon, bbox_deg=20.0, fro
     ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5, zorder=5)
     ax.add_feature(cfeature.LAKES, facecolor='none', edgecolor='cyan', linewidth=0.5, alpha=0.6, zorder=5)
     ax.add_feature(cfeature.STATES, linewidth=0.3, edgecolor='cyan', alpha=0.3, zorder=5)
-    ax.plot(center_lon, center_lat, '+', color='yellow', markersize=12,
-            markeredgewidth=2, transform=map_crs, zorder=10)
+    _plot_location_crosshair(ax, center_lon, center_lat, map_crs, markersize=12)
 
     if fronts:
         for front in fronts:
@@ -340,8 +348,7 @@ def add_geo_overlay(img, center_lat, center_lon, bbox_deg=20.0, fronts=None):
     ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5, zorder=5)
     ax.add_feature(cfeature.LAKES, facecolor='none', edgecolor='cyan', linewidth=0.5, alpha=0.6, zorder=5)
     ax.add_feature(cfeature.STATES, linewidth=0.3, edgecolor='cyan', alpha=0.3, zorder=5)
-    ax.plot(center_lon, center_lat, '+', color='yellow', markersize=12,
-            markeredgewidth=2, transform=map_crs, zorder=10)
+    _plot_location_crosshair(ax, center_lon, center_lat, map_crs, markersize=12)
 
     if fronts:
         for front in fronts:
@@ -1102,6 +1109,20 @@ def create_timelapse_gif(frames, output_path, fps=4):
         loop=0,
         optimize=False
     )
+
+
+def create_timelapse_webp(frames, output_path, fps=4, hold_last_ms=1500, quality=90):
+    """Create an animated WebP from a list of PIL Images.
+
+    Far smaller than GIF at full resolution and keeps full colour (GIF is
+    limited to 256). The last frame is held so the loop restart is obvious.
+    """
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+    duration = [int(1000 / fps)] * len(frames)
+    duration[-1] = max(duration[-1], hold_last_ms)
+    rgb = [f.convert("RGB") for f in frames]
+    rgb[0].save(output_path, format="WEBP", save_all=True, append_images=rgb[1:],
+                duration=duration, loop=0, quality=quality, method=4)
 
 
 def create_timelapse_mp4(frames, output_path, fps=4):

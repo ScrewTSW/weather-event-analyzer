@@ -104,10 +104,19 @@ Probing:
 
 Error handler preserves accumulated state — charts stay visible if a later stage crashes.
 
+Progressive UI: `fetch_data` yields through `out()`/`step()`, which send only the outputs passed
+(everything else is `gr.skip()`) — never re-send charts or 2048 px frames on a progress tick.
+Outputs in `PENDING_OUTPUTS` carry the `wea-pending` class (CSS stopwatch) until their first
+value. Satellite frames stream via `SatelliteClient.plan_event()` + `iter_frames()` generator.
+
 ### Timeline Slider
 
-- `on_frame_change` ONLY updates the satellite image — skips timeline output to prevent feedback loop
-- JS fires `trigger('change')` on slider input, Python serves the frame
+- `on_frame_change` outputs only image/sounding/hodo/label — never the timeline (feedback loop)
+- Backend updates to the timeline value ALSO fire `.change`; `state["shown_idx"]`/`["shown_hour"]`
+  make `on_frame_change` skip what is already on screen
+- Notches are rendered by `TIMELINE_HTML_TEMPLATE` itself — Gradio re-renders the template on
+  every prop change, so JS-built DOM is wiped. JS uses delegated listeners on `element`
+- JS fires `trigger('change')` on slider input / arrow keys (not when a text field has focus)
 
 ### Testing
 

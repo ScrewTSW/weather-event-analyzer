@@ -169,6 +169,15 @@ class SatelliteClient:
                     start_utc: str = None, end_utc: str = None,
                     product: str = "auto", zoom: int = 4, bbox_deg: float = 20.0,
                     on_progress=None) -> list[SatelliteFrame]:
+        source, timestamps = self.plan_event(lat, lon, date, start_utc, end_utc,
+                                             product, bbox_deg, on_progress)
+        return list(self.iter_frames(source, timestamps, lat, lon, zoom, bbox_deg, on_progress))
+
+    def plan_event(self, lat: float, lon: float, date: str = None,
+                   start_utc: str = None, end_utc: str = None,
+                   product: str = "auto", bbox_deg: float = 20.0,
+                   on_progress=None) -> tuple[SatelliteSource, list[str]]:
+        """Pick the source and the frame timestamps (probing for the latest in live mode)."""
         source = select_source(lat, lon, product)
 
         if on_progress:
@@ -190,15 +199,22 @@ class SatelliteClient:
             if not latest:
                 if on_progress:
                     on_progress("No valid frames found")
-                return []
+                return source, []
             end_dt = datetime.fromisoformat(latest.replace("Z", ""))
             start_dt = end_dt - timedelta(hours=2)
             timestamps = source.generate_timestamps(start_dt, end_dt)
 
         if on_progress:
             on_progress(f"Generated {len(timestamps)} timestamps ({source.cadence_min}-min intervals)")
+        return source, timestamps
 
-        results = []
+    def iter_frames(self, source: SatelliteSource, timestamps: list[str],
+                    lat: float, lon: float, zoom: int = 4, bbox_deg: float = 20.0,
+                    on_progress=None):
+        """Yield each SatelliteFrame as soon as it is fetched; empty/failed frames are skipped."""
+        if not timestamps:
+            return
+        produced = 0
         failed = 0
         stats_before = self.req.stats.cache_hits
         for i, ts in enumerate(timestamps):
@@ -229,16 +245,16 @@ class SatelliteClient:
                     lon - half,
                     lon + half,
                 )
-                results.append(SatelliteFrame(
+                produced += 1
+                yield SatelliteFrame(
                     source=source.name,
                     timestamp=ts,
                     image=self._normalize(img),
                     layer=source.layer,
                     bbox=frame_bbox,
-                ))
+                )
 
         cache_hits = self.req.stats.cache_hits - stats_before
         api_calls = len(timestamps) - cache_hits - failed
         if on_progress:
-            on_progress(f"Got {len(results)} frames ({cache_hits} CACHE, {api_calls} PULLED, {failed} FAILED)")
-        return results
+            on_progress(f"Got {produced} frames ({cache_hits} CACHE, {api_calls} PULLED, {failed} FAILED)")
