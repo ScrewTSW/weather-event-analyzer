@@ -59,18 +59,64 @@ class TestFetchEventResilience:
 
 
     @patch('core.api_request.requests.Session.get')
-    def test_window_outside_archive_is_skipped_after_three_probes(self, mock_get):
+    def test_window_outside_archive_is_skipped_after_probes(self, mock_get):
         black = io.BytesIO()
         Image.new("RGBA", (512, 512)).save(black, format="PNG")  # GIBS: transparent outside its archive
-        mock_get.side_effect = [MagicMock(status_code=200, content=black.getvalue()) for _ in range(3)]
+        mock_get.side_effect = [MagicMock(status_code=200, content=black.getvalue()) for _ in range(5)]
         logs = []
         _, timestamps = self.client.plan_event(
             lat=33.21, lon=-87.57, date="20110427", start_utc="2100", end_utc="0000",
             product="goes_east_geocolor", bbox_deg=20.0, on_progress=logs.append)
 
         assert timestamps == []
-        assert mock_get.call_count == 3  # first/middle/last probe, no 2048 px fetches
+        # first/middle/last geostationary probe + Terra + Aqua probe, no 2048 px fetches
+        assert mock_get.call_count == 5
         assert any("outside the" in line for line in logs)
+
+    @patch('core.api_request.requests.Session.get')
+    def test_window_outside_archive_falls_back_to_daily_polar_passes(self, mock_get):
+        black = io.BytesIO()
+        Image.new("RGBA", (512, 512)).save(black, format="PNG")
+        empty = MagicMock(status_code=200, content=black.getvalue())
+        mock_get.side_effect = [empty, empty, empty, _png_response(), _png_response()]
+        source, timestamps = self.client.plan_event(
+            lat=33.21, lon=-87.57, date="20110427", start_utc="2100", end_utc="0000",
+            product="goes_east_geocolor", bbox_deg=20.0)
+
+        # ~10:30 / ~13:30 local solar time at 87.57° W; VIIRS only starts in 2015
+        assert timestamps == ["2011-04-27T16:20:00Z", "2011-04-27T19:20:00Z"]
+        assert source.layer_for(timestamps[0]) == "MODIS_Terra_CorrectedReflectance_TrueColor"
+        assert source.layer_for(timestamps[1]) == "MODIS_Aqua_CorrectedReflectance_TrueColor"
+        assert "TIME=2011-04-27T19:20:00Z" in mock_get.call_args_list[4].args[0]
+        assert "MODIS_Aqua" in mock_get.call_args_list[4].args[0]
+
+    @patch('core.api_request.requests.Session.get')
+    def test_daily_polar_prefers_viirs_once_it_exists(self, mock_get):
+        black = io.BytesIO()
+        Image.new("RGBA", (512, 512)).save(black, format="PNG")
+        empty = MagicMock(status_code=200, content=black.getvalue())
+        mock_get.side_effect = [empty, empty, empty, _png_response(), _png_response(),
+                                _png_response(), _png_response()]
+        source, timestamps = self.client.plan_event(
+            lat=36.16, lon=-86.78, date="20190214", start_utc="1800", end_utc="2100",
+            product="goes_east_geocolor", bbox_deg=20.0)
+
+        frames = list(self.client.iter_frames(source, timestamps, 36.16, -86.78, bbox_deg=20.0))
+        assert [f.layer for f in frames] == ["MODIS_Terra_CorrectedReflectance_TrueColor",
+                                             "VIIRS_SNPP_CorrectedReflectance_TrueColor"]
+        assert frames[1].source == "VIIRS SNPP (daily pass)"
+
+    @patch('core.api_request.requests.Session.get')
+    def test_no_polar_probe_before_any_polar_archive(self, mock_get):
+        black = io.BytesIO()
+        Image.new("RGBA", (512, 512)).save(black, format="PNG")
+        mock_get.side_effect = [MagicMock(status_code=200, content=black.getvalue()) for _ in range(3)]
+        _, timestamps = self.client.plan_event(
+            lat=35.47, lon=-97.52, date="19820502", start_utc="2100", end_utc="0000",
+            product="goes_east_geocolor", bbox_deg=20.0)
+
+        assert timestamps == []
+        assert mock_get.call_count == 3
 
 
 class TestFetchBinaryRetry:

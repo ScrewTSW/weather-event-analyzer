@@ -10,7 +10,8 @@ from PIL import Image
 from core.cache import Cache
 from core.api_request import CachedRequest
 from core.models.satellite.base import SatelliteFrame
-from core.models.satellite.source import SatelliteSource, SOURCES, select_source
+from core.models.satellite.source import (DailyPolarSnapshot, SatelliteSource, SOURCES,
+                                          select_source)
 
 GIBS_WMTS = "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best"
 GIBS_WMS = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
@@ -73,8 +74,8 @@ class SatelliteClient:
         bbox = (lon - half, south, lon + half, north)
 
         if source.source_type == "gibs_wms":
-            url = _gibs_wms_url(source.layer, ts, bbox, size, size)
-            cache_key = f"wms/{source.layer}/{ts.replace(':', '')}/" \
+            url = _gibs_wms_url(source.layer_for(ts), ts, bbox, size, size)
+            cache_key = f"wms/{source.layer_for(ts)}/{ts.replace(':', '')}/" \
                         f"{lat:.2f}_{lon:.2f}_{bbox_deg}_{size}.jpg"
         elif source.source_type == "eumetsat_wms":
             url = _eumetsat_wms_url(source.layer, bbox, size, size, time_str=ts)
@@ -111,8 +112,8 @@ class SatelliteClient:
 
         for row in range(min_row, max_row + 1):
             for col in range(min_col, max_col + 1):
-                url = _gibs_wmts_tile_url(source.layer, source.matrix, ts, zoom, row, col)
-                cache_key = f"wmts/{source.layer}/{ts.replace(':', '')}/{zoom}/{row}_{col}.png"
+                url = _gibs_wmts_tile_url(source.layer_for(ts), source.matrix, ts, zoom, row, col)
+                cache_key = f"wmts/{source.layer_for(ts)}/{ts.replace(':', '')}/{zoom}/{row}_{col}.png"
                 tile = self._fetch_image(url, cache_key)
                 if tile:
                     x = (col - min_col) * 512
@@ -127,11 +128,11 @@ class SatelliteClient:
         half = bbox_deg / 2
         bbox = (lon - half, max(lat - half, -65.0), lon + half, min(lat + half, 65.0))
         if source.source_type == "gibs_wms":
-            url = _gibs_wms_url(source.layer, ts, bbox, 128, 128)
+            url = _gibs_wms_url(source.layer_for(ts), ts, bbox, 128, 128)
         elif source.source_type == "eumetsat_wms":
             url = _eumetsat_wms_url(source.layer, bbox, 128, 128, time_str=ts)
         else:
-            url = _gibs_wmts_tile_url(source.layer, source.matrix, ts, 2, 0, 0)
+            url = _gibs_wmts_tile_url(source.layer_for(ts), source.matrix, ts, 2, 0, 0)
         try:
             resp = self.req.fetch_raw(url)
             if resp.status_code == 200 and len(resp.content) > 500:
@@ -197,12 +198,13 @@ class SatelliteClient:
             # Geostationary layers keep only recent months — check with cheap probes
             # (first/middle/last) before fetching every 2048 px frame of an old event
             probes = {timestamps[0], timestamps[len(timestamps) // 2], timestamps[-1]} if timestamps else set()
-            if probes and not any((img := self._probe_frame(source, ts, lat, lon, bbox_deg))
-                                  and self._has_content(img) for ts in sorted(probes)):
+            if probes and not any(self._probe_has_content(source, ts, lat, lon, bbox_deg)
+                                  for ts in sorted(probes)):
                 if on_progress:
                     on_progress(f"No {source.name} imagery for {start_dt:%Y-%m-%d %H:%M}-"
                                 f"{end_dt:%H:%M} UTC — outside the {source.layer} archive")
-                return source, []
+                return self._plan_daily_polar(source, start_dt.date(), lat, lon, bbox_deg,
+                                              on_progress)
         else:
             latest = self.probe_latest(source, lat, lon, bbox_deg, on_progress)
             if not latest:
@@ -216,6 +218,31 @@ class SatelliteClient:
         if on_progress:
             on_progress(f"Generated {len(timestamps)} timestamps ({source.cadence_min}-min intervals)")
         return source, timestamps
+
+    def _probe_has_content(self, source: SatelliteSource, ts: str, lat: float, lon: float,
+                           bbox_deg: float) -> bool:
+        img = self._probe_frame(source, ts, lat, lon, bbox_deg)
+        return img is not None and self._has_content(img)
+
+    def _plan_daily_polar(self, fallback: SatelliteSource, day, lat: float, lon: float,
+                          bbox_deg: float, on_progress=None) -> tuple[SatelliteSource, list[str]]:
+        """One frame per polar-orbiter pass that day (MODIS 2000+, VIIRS 2015+)."""
+        polar = DailyPolarSnapshot(day, lon)
+        for ts, candidates in polar.slots():
+            for p in candidates:
+                polar.passes[ts] = p
+                if self._probe_has_content(polar, ts, lat, lon, bbox_deg):
+                    break
+                del polar.passes[ts]
+        if not polar.passes:
+            if on_progress:
+                on_progress(f"No daily polar-orbiter imagery for {day} either")
+            return fallback, []
+        timestamps = sorted(polar.passes)
+        if on_progress:
+            on_progress("Falling back to daily polar passes: " + ", ".join(
+                f"{polar.passes[ts].name} ~{ts[11:16]} UTC" for ts in timestamps))
+        return polar, timestamps
 
     def iter_frames(self, source: SatelliteSource, timestamps: list[str],
                     lat: float, lon: float, zoom: int = 4, bbox_deg: float = 20.0,
@@ -256,10 +283,10 @@ class SatelliteClient:
                 )
                 produced += 1
                 yield SatelliteFrame(
-                    source=source.name,
+                    source=source.name_for(ts),
                     timestamp=ts,
                     image=self._normalize(img),
-                    layer=source.layer,
+                    layer=source.layer_for(ts),
                     bbox=frame_bbox,
                 )
 

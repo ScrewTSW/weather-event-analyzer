@@ -57,14 +57,20 @@ sounding archive is global ❔).
 | Source | Date range | Spatial | Time | Format |
 |---|---|---|---|---|
 | NASA GIBS geostationary (GOES-East/West GeoColor, Band 13 IR, Air Mass; Himawari Band 13…) | **rolling ~90 days** ✅ (capabilities 2026-11-02: GOES-East GeoColor from 2026-08-10, Himawari Band 13 from 2026-09-22) | WMS, any bbox | 10 min | PNG/JPEG, transparent outside archive |
-| NASA GIBS MODIS Terra true colour | 2000-02-24 → ✅ (capabilities) | WMS, 250 m | **daily** (one pass, ~10:30 local) | |
-| NASA GIBS VIIRS SNPP true colour | 2015-11-24 → ✅ (capabilities) | WMS, 250 m–375 m | daily (~13:30 local) | |
+| NASA GIBS MODIS Terra true colour | 2000-02-24 → ✅ (capabilities; gaps e.g. 2000-04-26/27) | WMS, 250 m | **daily** mosaic (~10:30 local) | 2011 ✅, 2019 ✅; 1999 → 294-byte black PNG |
+| NASA GIBS MODIS Aqua true colour | 2002-07-03 → ✅ (capabilities; gap 2022-04-01…04-16) | WMS, 250 m | daily mosaic (~13:30 local) | 2011 ✅; black wedges between swaths at low latitudes |
+| NASA GIBS VIIRS SNPP true colour | 2015-11-24 → ✅ (capabilities; several 2022–24 gaps) | WMS, 375 m | daily mosaic (~13:30 local) | 2019 ✅ (US + Germany); no swath gaps |
+| EUMETSAT `view.eumetsat.int` (Meteosat IR/VIS) | recent only — **HTTP 502** for 2011 and 2019 ✅ | WMS | 15 min | first date ❔ |
 | NOAA GOES-16 on AWS `noaa-goes16.s3.amazonaws.com` | 2017 → ❔; 2019-06-11 ✅ | CONUS `ABI-L2-CMIPC` 2 km (band 13) / full disk `CMIPF` | CONUS 5 min (4.7 MB/file ✅), full disk 10 min (27.6 MB ✅) | NetCDF, GOES fixed-grid projection — needs decode + reproject |
 | IEM GIS archive `archive/data/YYYY/MM/DD/GIS/sat/awips211/` | 2015 GOES-East IR/VIS/WV ✅; 2019 GOES-West only ✅; 2011 empty ✅ | CONUS Lambert, 4 km (`.wld` 4063.5 m) | ~30 min | PNG + world file |
 | Himawari-8/9 on AWS, Meteosat | ❔ | | | Himawari = HSD binary; no free Meteosat archive known |
 
-Current behaviour: `plan_event` probes first/middle/last frame (128 px, uncached); if all
-empty it logs "outside the … archive" and returns no timestamps — no 2048 px fetches.
-Gap: no satellite imagery before the GIBS window. Candidates, in effort order:
-MODIS/VIIRS daily still (2000+/2015+), GOES-16 NetCDF from S3 (2017+, CONUS loop),
-IEM 4 km IR loop (patchy).
+Fallback: geostationary (GIBS / EUMETSAT) → daily polar passes (`DailyPolarSnapshot`).
+`plan_event` probes the first/middle/last frame (128 px, uncached). If all are empty it
+probes one frame per polar slot — MODIS Terra (~10:30 local), then VIIRS → MODIS Aqua
+(~13:30 local) — and returns those that have data, timestamped at the pass's approximate
+UTC time over the requested longitude (`10:30 − lon/15 h`). GIBS snaps TIME to the UTC day.
+Before 2000-02-24 nothing is probed and no frames are returned. Verified 2026-11-02:
+Tuscaloosa 2011 (Terra + Aqua), Nashville 2019 and Germany 2019 (Terra + VIIRS), OKC 1982 (none).
+Still missing: an animated loop for old events — GOES-16 NetCDF from S3 (2017+, CONUS)
+or the IEM 4 km IR archive (patchy).

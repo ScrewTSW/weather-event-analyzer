@@ -7,7 +7,7 @@ for the latest available frame.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 
 
 @dataclass
@@ -39,6 +39,12 @@ class SatelliteSource:
             timestamps.append(t.strftime("%Y-%m-%dT%H:%M:%SZ"))
             t += timedelta(minutes=self.cadence_min)
         return timestamps
+
+    def layer_for(self, ts: str) -> str:
+        return self.layer
+
+    def name_for(self, ts: str) -> str:
+        return self.name
 
 
 class GOESEastGeocolor(SatelliteSource):
@@ -159,6 +165,58 @@ class VIIRS(SatelliteSource):
             matrix="250m",
             max_zoom=8,
         )
+
+
+@dataclass(frozen=True)
+class PolarPass:
+    name: str
+    layer: str
+    local_hour: float   # equator-crossing local solar time of the daytime pass
+    first_date: date    # first day in the GIBS archive (capabilities, checked 2026-11-02)
+
+
+# Per time slot in preference order — VIIRS has no gaps between swaths, Aqua does
+POLAR_SLOTS = (
+    (PolarPass("MODIS Terra", "MODIS_Terra_CorrectedReflectance_TrueColor", 10.5, date(2000, 2, 24)),),
+    (PolarPass("VIIRS SNPP", "VIIRS_SNPP_CorrectedReflectance_TrueColor", 13.5, date(2015, 11, 24)),
+     PolarPass("MODIS Aqua", "MODIS_Aqua_CorrectedReflectance_TrueColor", 13.5, date(2002, 7, 3))),
+)
+
+
+class DailyPolarSnapshot(SatelliteSource):
+    """Fallback for dates outside the geostationary archive: the daily polar-orbiter
+    mosaics (2000+), one frame per pass at the local solar time it crosses `lon`.
+
+    GIBS snaps TIME to the UTC day, so the frame timestamp is the approximate pass
+    time; `passes` maps each timestamp to the layer that was found to have data.
+    """
+
+    def __init__(self, day: date, lon: float):
+        super().__init__(name="daily_polar", layer="", source_type="gibs_wms",
+                         cadence_min=1440, latency_min=180)
+        self.day, self.lon = day, lon
+        self.passes: dict[str, PolarPass] = {}
+
+    def slots(self) -> list[tuple[str, list[PolarPass]]]:
+        """(timestamp, candidate passes) for each slot that has an archive on `day`."""
+        out = []
+        for slot in POLAR_SLOTS:
+            candidates = [p for p in slot if p.first_date <= self.day]
+            if candidates:
+                hours = candidates[0].local_hour - self.lon / 15
+                t = datetime.combine(self.day, datetime.min.time()) + timedelta(hours=hours)
+                out.append((self.snap_10min(t).strftime("%Y-%m-%dT%H:%M:%SZ"), candidates))
+        return out
+
+    @staticmethod
+    def snap_10min(dt: datetime) -> datetime:
+        return dt.replace(minute=dt.minute // 10 * 10, second=0, microsecond=0)
+
+    def layer_for(self, ts: str) -> str:
+        return self.passes[ts].layer
+
+    def name_for(self, ts: str) -> str:
+        return f"{self.passes[ts].name} (daily pass)"
 
 
 SOURCES = {

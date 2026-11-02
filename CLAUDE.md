@@ -115,8 +115,10 @@ Each client falls back to an archive when the date is outside the live window �
 - Pressure levels: forecast (±7 d) → historical forecast (~2021+) → nearest IEM RAOB (N. America)
 - MDs/outlook: IEM point MD archive (2003+) + SPC outlook archive when date ≠ today
 - MSLP extrema: ERA5 archive (4° grid, 90 s timeout); SPC reports: `YYMMDD_rpts_torn.csv`
-- Satellite: `plan_event` probes first/middle/last frame and returns no timestamps when the
-  window is outside the GIBS (~90 day) archive — no historical imagery source yet
+- Satellite: `plan_event` probes first/middle/last frame; outside the geostationary archive
+  (GIBS ~90 days, EUMETSAT 502s) it falls back to `DailyPolarSnapshot` — one MODIS/VIIRS
+  daily-mosaic frame per pass (2000+). Sources pick layer/name per timestamp via
+  `layer_for(ts)` / `name_for(ts)` — use those, not `source.layer`, when building URLs
 
 Progressive UI: `fetch_data` yields through `out()`/`step()`, which send only the outputs passed
 (everything else is `gr.skip()`) — never re-send charts or 2048 px frames on a progress tick.
