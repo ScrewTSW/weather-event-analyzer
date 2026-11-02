@@ -821,6 +821,9 @@ def _fetch_alerts_uncached(lat: float, lon: float, datetime_utc: str,
 
     # Fetch from each source
     for source in sources:
+        import time as _t
+        _t0 = _t.time()
+        logger.info(f"Alerts: fetching {source}...")
         try:
             result = None
             if source == "gdacs":
@@ -868,9 +871,10 @@ def _fetch_alerts_uncached(lat: float, lon: float, datetime_utc: str,
                 for alert in result.alerts:
                     alert.source = result.source
                 all_alerts.extend(result.alerts)
+            logger.info(f"Alerts: {source} done in {_t.time()-_t0:.1f}s ({len(result.alerts) if result else 0} alerts)")
 
         except Exception as e:
-            logger.warning(f"Failed to fetch from {source}: {e}")
+            logger.warning(f"Alerts: {source} FAILED in {_t.time()-_t0:.1f}s: {e}")
             continue
 
     # Filter by proximity — only show alerts within relevant distance

@@ -50,6 +50,7 @@ class Cache:
             """)
 
     def _conn(self) -> sqlite3.Connection:
+        self.cache_dir.mkdir(parents=True, exist_ok=True)
         return sqlite3.connect(str(self.db_path), timeout=5)
 
     def _migrate_manifest(self):

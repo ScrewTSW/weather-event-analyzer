@@ -14,24 +14,25 @@ core/
 ├── models/              # Typed dataclass DTOs
 │   ├── base.py          # BaseDataResult (all models extend this)
 │   ├── atmosphere/      # AtmosphereData, VariableTimeSeries, OpenMeteo*
-│   ├── pressure_levels/ # PressureLevelSnapshot, PressureLevelHourly
+│   ├── pressure_levels/ # PressureLevelSnapshot/Hourly, extract_snapshot()
 │   ├── discussion/      # Discussion + per-source: SPC, ESTOFEX, BOM, etc.
 │   ├── fronts/          # FrontalFeature
 │   ├── alerts/          # Alert, SourceResult
-│   └── satellite/       # SatelliteFrame
-├── atmosphere.py        # OpenMeteoClient
-├── pressure_levels.py   # PressureLevelClient
-├── satellite.py         # SatelliteClient
-├── fronts.py            # FrontalAnalyzer
-├── discussions.py       # MesoscaleDiscussionClient
-├── alerts.py            # 7 alert source clients + fetch_alerts orchestrator
-├── visualize.py         # All chart rendering (matplotlib/MetPy)
-├── location.py          # Geocoding + satellite source selection
+│   └── satellite/       # SatelliteFrame, SatelliteSource + per-source handlers
+│       └── source.py    # GOESEastGeocolor, HimawariIR, MeteosatIR, etc.
+├── atmosphere.py        # OpenMeteoClient (cached)
+├── pressure_levels.py   # PressureLevelClient (cached), snap_to_synoptic, extract_snapshot
+├── satellite.py         # SatelliteClient: probe_latest, _has_content, _normalize 2048x2048
+├── fronts.py            # FrontalAnalyzer (experimental), find_pressure_extrema
+├── discussions.py       # MesoscaleDiscussionClient (cached)
+├── alerts.py            # 7 alert clients + fetch_alerts orchestrator (cached, 5min TTL)
+├── visualize.py         # Charts (Skew-T, hodograph, time-series), render_geo_overlay
+├── location.py          # Geocoding (Nominatim, cached 24h) + satellite source selection
 └── projection.py        # Geostationary projection math
 
 app.py                   # Gradio web UI
 cli.py                   # CLI interface
-main.py                  # Entry point
+main.py                  # Entry point (--web, --host, --port, --cache-dir)
 ```
 
 ## Critical Rules
@@ -40,54 +41,87 @@ main.py                  # Entry point
 
 - **ALL external HTTP calls MUST go through `CachedRequest`** (`core/api_request.py`)
 - NEVER use `requests.get()`, `requests.Session()`, or `session.get()` directly
-- NEVER define `USER_AGENT` locally — it's set once in `api_request.py`
-- NEVER use `time.sleep()` for rate limiting — `CachedRequest._rate_limit()` handles it per-domain
-- Use `req.fetch_json()` for JSON APIs, `req.fetch_text()` for HTML/text, `req.fetch_raw()` for XML/CSV, `req.fetch_binary()` for images, `req.fetch_or_compute()` for multi-step cached results
+- NEVER define `USER_AGENT` locally — set once in `api_request.py`
+- NEVER use `time.sleep()` for rate limiting — `CachedRequest._rate_limit()` handles per-domain
+- NEVER cache probe requests — probes use `_probe_frame()` / `fetch_raw()`, not `fetch_binary()`
+- Methods: `fetch_json()`, `fetch_text()`, `fetch_raw()` (XML/CSV), `fetch_binary()` (images), `fetch_or_compute()` (multi-step)
 
-### Rate Limits
+### Rate Limits & Daily Budgets
 
-Per-domain rate limits are defined in `DOMAIN_RATE_LIMITS` in `api_request.py`. Daily call budgets in `DOMAIN_DAILY_LIMITS`. When adding a new data source:
-1. Add its domain to both dictionaries
-2. Research the API's usage policy and set appropriate limits
-3. Document the source URL in the comments
+Defined in `DOMAIN_RATE_LIMITS` and `DOMAIN_DAILY_LIMITS` in `api_request.py`. Every domain that the app calls must be listed. When adding a new source:
+1. Add its domain to both dicts
+2. Research the API's usage policy
+3. Document the source URL in comments
+
+### Satellite Sources
+
+Each satellite source is a `SatelliteSource` class in `core/models/satellite/source.py`:
+- Defines cadence, latency, layer name, URL type
+- `estimate_latest()` returns expected latest available time (now - latency)
+- `generate_timestamps()` builds the frame window
+- `select_source(lat, lon, product)` returns the right handler by region
+
+Probing:
+- `probe_latest()` walks backward from `estimate_latest()`, checks `_has_content()` (mean pixel > 8)
+- Probes use 128px throwaway images via `_probe_frame()` — NEVER cached
+- Full frames fetched at `OUTPUT_SIZE` (2048px) and normalized via `_normalize()`
 
 ### Data Models
 
-- ALL data returned from clients MUST be typed dataclasses from `core/models/`
-- NEVER return raw dicts from data-fetching functions
-- New data sources get their own file under the appropriate `core/models/{domain}/` folder
-- Source-specific models extend the domain base class (e.g., `SPCMesoscaleDiscussion(Discussion)`)
-- Put `parse()` classmethods on source-specific models when the source needs custom parsing
+- ALL data from clients MUST be typed dataclasses from `core/models/`
+- NEVER return raw dicts
+- Per-source models extend the domain base (e.g., `SPCMesoscaleDiscussion(Discussion)`)
+- Cache keys include size for images to prevent probe/full-res collision
 
 ### Caching
 
-- Cache is SQLite metadata (`cache.db`) + files on disk — NEVER store blobs in SQLite
-- JSON API responses: use `req.fetch_json(url, cache_key=..., ttl=...)` — raw JSON cached before parsing
-- Multi-step results: use `req.fetch_or_compute(cache_key, compute_fn, ttl=...)` — cache the final computed result
-- Binary (satellite tiles): use `req.fetch_binary(url, cache_key=...)` — cached as files on disk
-- Cache keys follow convention: `json/{module}/{operation}/{params}.json` or `{type}/{layer}/{params}.ext`
+- SQLite metadata (`cache.db`) + files on disk — NEVER blobs in SQLite
+- `_conn()` recreates the cache directory if deleted
+- JSON: `fetch_json(url, cache_key, ttl)` — raw JSON cached before DTO parsing
+- Binary: `fetch_binary(url, cache_key)` — satellite tiles on disk
+- Computed: `fetch_or_compute(cache_key, fn, ttl)` — for multi-step results (alerts, discussions)
+- Cache keys: `json/{module}/{operation}/{params}.json` or `wms/{layer}/{ts}/{params}_{size}.jpg`
+- Daily cleanup at midnight UTC, 7-day max age
 
-### Charts and Visualization
+### Visualization
 
-- All charts use `plt.style.use("dark_background")`
-- All charts return `matplotlib.figure.Figure`
-- In `app.py`, figures are converted to PIL images via `_fig_to_pil()` for `gr.Image` rendering (enables fullscreen)
-- MetPy units: always attach `units` from `metpy.units` before passing to `mpcalc` functions
-- Skew-T uses `dpi=150`, hodograph uses `dpi=150`
+- All charts: `plt.style.use("dark_background")`, return `matplotlib.figure.Figure`
+- `app.py` converts figures to PIL via `_fig_to_pil()` for `gr.Image` (enables fullscreen)
+- MetPy units: always attach before `mpcalc` calls
+- `render_geo_overlay()` renders coastlines/borders ONCE on transparent canvas, composited onto each frame — never per-frame cartopy
+- Skew-T and hodograph at `dpi=150`
+
+### Fetch Pipeline Order (app.py)
+
+1. Resolve location (geocode, cached 24h)
+2. Probe latest satellite frame (if live mode — no date/time specified)
+3. Atmosphere surface data → render CAPE/Temp/Wind charts
+4. Pressure levels → render sounding + hodograph, add helicity to CAPE chart
+5. Mesoscale discussions
+6. Frontal analysis (optional)
+7. Satellite imagery (render geo overlay once, composite per frame)
+8. **Alerts (LAST — slowest, multiple external sources can timeout)**
+
+Error handler preserves accumulated state — charts stay visible if a later stage crashes.
+
+### Timeline Slider
+
+- `on_frame_change` ONLY updates the satellite image — skips timeline output to prevent feedback loop
+- JS fires `trigger('change')` on slider input, Python serves the frame
 
 ### Testing
 
-- Unit tests in `tests/test_*.py` — mocked, no network, fast
-- E2E integration tests in `tests/test_e2e_integration.py` — real API calls, marked `@pytest.mark.integration`
-- Use `_fetch_once()` pattern in E2E tests to share fetched data across test classes
-- Mock patches target `core.api_request.requests.Session` (not the module that uses CachedRequest)
+- Unit tests: `tests/test_*.py` — mocked, no network
+- E2E tests: `tests/test_e2e_integration.py` — real API calls, `@pytest.mark.integration`
+- `_fetch_once()` shares data across E2E test classes to avoid rate limits
+- Mock patches target `core.api_request.requests.Session`
 
 ### Adding a New Data Source
 
-1. Create model in `core/models/{domain}/{source}.py` extending the domain base
+1. Create model in `core/models/{domain}/{source}.py` extending domain base
 2. Export from `core/models/{domain}/__init__.py`
-3. Add domain to `DOMAIN_RATE_LIMITS` and `DOMAIN_DAILY_LIMITS` in `api_request.py`
-4. Implement client using `self.req = CachedRequest(cache=cache)` — no raw HTTP
+3. Add domain to `DOMAIN_RATE_LIMITS` and `DOMAIN_DAILY_LIMITS`
+4. Implement client with `self.req = CachedRequest(cache=cache)`
 5. Return typed dataclass, never dicts
 6. Add unit test (mocked) + E2E test (real API)
-7. Update README.md data sources table
+7. Update README.md

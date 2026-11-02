@@ -11,14 +11,15 @@ from PIL import Image
 
 from core.cache import Cache, default_cache_dir
 from core.location import resolve_location, init_cache as init_location_cache
-from core.satellite import SatelliteClient, SOURCES
+from core.satellite import SatelliteClient
+from core.models.satellite.source import SOURCES
 from core.atmosphere import OpenMeteoClient
 from core.alerts import fetch_alerts
 from core.visualize import create_atmosphere_chart, add_timestamp_label, add_geo_overlay
-from core.pressure_levels import PressureLevelClient, snap_to_synoptic
+from core.pressure_levels import PressureLevelClient, snap_to_synoptic, extract_snapshot
 from core.visualize import create_sounding_chart, create_hodograph_chart
 from core.discussions import MesoscaleDiscussionClient
-from core.fronts import FrontalAnalyzer
+from core.fronts import FrontalAnalyzer, find_pressure_extrema
 
 
 TIMELINE_HTML_TEMPLATE = """
@@ -107,7 +108,8 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
     discussion_client = MesoscaleDiscussionClient(cache=cache)
     frontal_analyzer = FrontalAnalyzer()
 
-    state = {"composed_frames": [], "frame_labels": []}
+    state = {"composed_frames": [], "frame_labels": [], "profile_hourly": None,
+             "sounding_by_hour": {}, "hodo_by_hour": {}}
 
     def fetch_data(location_str, date, start_utc, end_utc, zoom, product, show_fronts):
         log_lines = []
@@ -166,21 +168,24 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             log(f"Satellite: {satellite['name']}")
             yield out(info=info, progress=progress_html("Resolving location...", 5))
 
+            bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
+
             # Probe for latest available satellite frame when using live mode
             if is_live:
                 log("Probing for latest satellite data...")
                 yield out(info=info, progress=progress_html("Probing latest satellite data...", 8))
-                bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
-                latest = sat_client.probe_latest(lat, lon, product=product, bbox_deg=bbox_deg)
+                from core.models.satellite.source import select_source as _select_src
+                _sat_source = _select_src(lat, lon, product)
+                latest = sat_client.probe_latest(_sat_source, lat, lon, bbox_deg=bbox_deg, on_progress=log)
                 if latest:
                     from datetime import datetime as dt_parse
                     latest_dt = dt_parse.fromisoformat(latest.replace("Z", ""))
                     end_utc = latest_dt.strftime("%H:%M")
-                    start_utc = (latest_dt - timedelta(hours=2)).strftime("%H:%M")
+                    start_utc = (latest_dt - timedelta(hours=3)).strftime("%H:%M")
                     date = latest_dt.strftime("%Y-%m-%d")
                     log(f"Latest frame: {latest} — window {start_utc}-{end_utc} UTC")
                 else:
-                    start_utc = (now - timedelta(hours=2)).strftime("%H:%M")
+                    start_utc = (now - timedelta(hours=3)).strftime("%H:%M")
                     end_utc = now.strftime("%H:%M")
                     log("Could not probe latest — using approximate time")
             else:
@@ -209,47 +214,50 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             log("Rendered time-series charts")
             yield out(info=info, cape=cape, temp=temp, wind=wind, progress=progress_html("Rendering charts...", 25))
 
-            # 2. Alerts
-            yield out(info=info, cape=cape, temp=temp, wind=wind, progress=progress_html("Fetching alerts...", 60))
+            alerts_data = []
             sc = start_utc.replace(":", ""); ec = end_utc.replace(":", "")
-            mid = str((int(sc) + int(ec)) // 2).zfill(4)
-            _alerts_cache_before = cache.stats().get("json", {}).get("count", 0) if cache else 0
-            alerts_raw = fetch_alerts(lat, lon, f"{date}T{mid[:2]}:{mid[2:]}:00", cache=cache)
-            _alerts_cache_after = cache.stats().get("json", {}).get("count", 0) if cache else 0
-            alert_tag = "CACHE" if _alerts_cache_after == _alerts_cache_before else "PULLED"
-            log(f"{alert_tag} {len(alerts_raw)} alerts")
-            alerts_data = _format_alerts(alerts_raw)
-            yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Fetching alerts...", 60))
 
-            # 3. Pressure-level data (sounding, hodograph, helicity)
+            # 2. Pressure-level data (sounding, hodograph, helicity)
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Fetching pressure-level data...", 35))
             sc_h = int(start_utc.replace(":", "")[:2]) if start_utc else 12
             synoptic_h = snap_to_synoptic(sc_h)
-            synoptic_label = f"Synoptic time: {synoptic_h:02d}Z {date}"
+            synoptic_label = f"Sounding time: {synoptic_h:02d}:00 UTC"
 
-            try:
-                h_before = pressure_client.req.stats.cache_hits
-                profile = pressure_client.fetch_snapshot(lat, lon, date, sc_h)
-                snap_tag = "CACHE" if pressure_client.req.stats.cache_hits > h_before else "PULLED"
-                log(f"{snap_tag} pressure snapshot ({synoptic_h:02d}Z)")
-                yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Rendering sounding & hodograph...", 50))
-                sounding = _fig_to_pil(create_sounding_chart(profile))
-                hodo = _fig_to_pil(create_hodograph_chart(profile))
-                log("Rendered sounding & hodograph")
-            except Exception as e:
-                log(f"Sounding/Hodograph failed: {e}")
-                sounding, hodo = None, None
-
+            profile_hourly = None
             try:
                 h_before = pressure_client.req.stats.cache_hits
                 profile_hourly = pressure_client.fetch_hourly(lat, lon, date)
                 hourly_tag = "CACHE" if pressure_client.req.stats.cache_hits > h_before else "PULLED"
-                log(f"{hourly_tag} pressure hourly")
+                log(f"{hourly_tag} pressure hourly ({len(profile_hourly.timestamps)}h)")
+                state["profile_hourly"] = profile_hourly
+
+                yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data, progress=progress_html("Pre-rendering soundings...", 45))
+
+                sounding_by_hour = {}
+                hodo_by_hour = {}
+                snap_idx = 0
+                for i, ts in enumerate(profile_hourly.timestamps):
+                    try:
+                        h = int(ts.split("T")[1].split(":")[0])
+                    except (ValueError, IndexError):
+                        continue
+                    profile = extract_snapshot(profile_hourly, i)
+                    sounding_by_hour[h] = _fig_to_pil(create_sounding_chart(profile))
+                    hodo_by_hour[h] = _fig_to_pil(create_hodograph_chart(profile))
+                    if f"T{synoptic_h:02d}:" in ts:
+                        snap_idx = i
+                state["sounding_by_hour"] = sounding_by_hour
+                state["hodo_by_hour"] = hodo_by_hour
+                sounding = sounding_by_hour.get(synoptic_h)
+                hodo = hodo_by_hour.get(synoptic_h)
+                log(f"Pre-rendered {len(sounding_by_hour)} soundings & hodographs")
+
                 cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin", profile_hourly=profile_hourly))
                 has_cape = "cape" in atmo.variables
                 log("Helicity added to CAPE/CIN chart" + ("" if has_cape else " (CAPE computed from profiles)"))
             except Exception as e:
-                log(f"Helicity computation failed: {e}")
+                log(f"Sounding/Hodograph failed: {e}")
+                sounding, hodo = None, None
 
             yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
                       sounding=sounding, hodo=hodo, synoptic_label=synoptic_label, progress=progress_html("Rendering sounding & hodograph...", 50))
@@ -276,10 +284,9 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                       sounding=sounding, hodo=hodo, discussion=disc_text,
                       synoptic_label=synoptic_label, progress=progress_html("Fetching mesoscale discussions...", 70))
 
-            # 5. Frontal analysis (optional)
-            if not is_live:
-                bbox_deg = {0: 40, 1: 30, 2: 20, 3: 10, 4: 5}[int(zoom)]
+            # 5. Frontal analysis + pressure extrema
             detected_fronts = None
+            pressure_extrema = None
             if show_fronts:
                 log("Running frontal analysis...")
                 yield out(info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
@@ -293,6 +300,14 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                     log(f"Detected {n_fronts} frontal feature(s)")
                 except Exception as e:
                     log(f"Frontal analysis failed: {e}")
+
+            log("Detecting pressure centers...")
+            try:
+                pressure_extrema = find_pressure_extrema(
+                    lat, lon, date, hour=synoptic_h, bbox_deg=bbox_deg)
+                log(f"Found {len(pressure_extrema)} pressure center(s)")
+            except Exception as e:
+                log(f"Pressure extrema failed: {e}")
 
             # 6. Satellite imagery (pre-projected tiles from GIBS/EUMETSAT)
             date_c = date.replace("-", "")
@@ -312,12 +327,24 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                       sounding=sounding, hodo=hodo, discussion=disc_text,
                       synoptic_label=synoptic_label, progress=progress_html("Compositing satellite frames...", 90))
 
+            # Render coastlines/borders overlay once, composite onto each frame
+            from core.visualize import render_geo_overlay
+            geo_overlay = None
+            if frames:
+                log("Rendering geo overlay...")
+                geo_overlay = render_geo_overlay(
+                    frames[0].image.width, frames[0].image.height,
+                    lat, lon, bbox_deg=bbox_deg, fronts=detected_fronts,
+                    pressure_extrema=pressure_extrema)
+                log(f"Geo overlay rendered ({geo_overlay.width}x{geo_overlay.height})")
+
             composed, labels = [], []
             for i, f in enumerate(frames):
                 ts = f.timestamp
                 label = ts.replace("T", " ").replace("Z", " UTC")
-                img = add_geo_overlay(f.image, lat, lon, bbox_deg=bbox_deg,
-                                      fronts=detected_fronts)
+                img = f.image.convert("RGBA")
+                if geo_overlay:
+                    img = Image.alpha_composite(img, geo_overlay)
                 img = add_timestamp_label(img, label, f.source, display)
                 composed.append(img)
                 labels.append(label)
@@ -329,9 +356,26 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
 
             state["composed_frames"] = composed
             state["frame_labels"] = labels
+            last_idx = len(composed) - 1 if composed else 0
+            yield out(image=composed[last_idx] if composed else None,
+                      timeline=gr.HTML(value=last_idx, labels_json=json.dumps(labels), frame_count=len(labels)),
+                      info=info, cape=cape, temp=temp, wind=wind,
+                      sounding=sounding, hodo=hodo, discussion=disc_text,
+                      synoptic_label=synoptic_label, progress=progress_html("Fetching alerts...", 95))
+
+            # 7. Alerts (last — slowest due to multiple external sources)
+            log("Fetching alerts...")
+            mid = str((int(sc) + int(ec)) // 2).zfill(4)
+            _alerts_cache_before = cache.stats().get("json", {}).get("count", 0) if cache else 0
+            alerts_raw = fetch_alerts(lat, lon, f"{date}T{mid[:2]}:{mid[2:]}:00", cache=cache)
+            _alerts_cache_after = cache.stats().get("json", {}).get("count", 0) if cache else 0
+            alert_tag = "CACHE" if _alerts_cache_after == _alerts_cache_before else "PULLED"
+            log(f"{alert_tag} {len(alerts_raw)} alerts")
+            alerts_data = _format_alerts(alerts_raw)
+
             log("Done.")
-            yield out(image=composed[0] if composed else None,
-                      timeline=gr.HTML(value=0, labels_json=json.dumps(labels), frame_count=len(labels)),
+            yield out(image=composed[last_idx] if composed else None,
+                      timeline=gr.HTML(value=last_idx, labels_json=json.dumps(labels), frame_count=len(labels)),
                       info=info, cape=cape, temp=temp, wind=wind, alerts=alerts_data,
                       sounding=sounding, hodo=hodo, discussion=disc_text,
                       synoptic_label=synoptic_label, progress=progress_html(f"Ready — {synoptic_label}", 100))
@@ -344,7 +388,6 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
 
     def on_frame_change(timeline_value, evt: gr.EventData = None):
         """Called when the timeline slider triggers 'change' via JS trigger()."""
-        import json
         try:
             idx = int(timeline_value) if timeline_value is not None else 0
         except (ValueError, TypeError):
@@ -352,8 +395,30 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         frames = state["composed_frames"]
         labels = state["frame_labels"]
         if not frames or idx >= len(frames):
-            return (None, gr.skip()) + tuple(gr.skip() for _ in range(11))
-        return (frames[idx], gr.HTML(value=idx, labels_json=json.dumps(labels), frame_count=len(labels))) + tuple(gr.skip() for _ in range(11))
+            return (None,) + tuple(gr.skip() for _ in range(11))
+
+        sounding_map = state.get("sounding_by_hour", {})
+        hodo_map = state.get("hodo_by_hour", {})
+        if sounding_map and idx < len(labels):
+            frame_label = labels[idx]
+            parts = frame_label.strip().split(" ")
+            time_part = parts[-2] if len(parts) >= 2 else "12:00"
+            try:
+                frame_h = int(time_part.split(":")[0])
+            except (ValueError, IndexError):
+                frame_h = 12
+
+            available = sorted(sounding_map.keys())
+            best_h = min(available, key=lambda h: abs(h - frame_h)) if available else frame_h
+
+            sounding_img = sounding_map.get(best_h)
+            hodo_img = hodo_map.get(best_h)
+            syn_label = f"Sounding time: {best_h:02d}:00 UTC"
+            return (frames[idx], gr.skip(), gr.skip(), gr.skip(),
+                    gr.skip(), gr.skip(), gr.skip(),
+                    sounding_img, hodo_img, gr.skip(), syn_label, gr.skip())
+
+        return (frames[idx],) + tuple(gr.skip() for _ in range(11))
 
     TOOLTIP_CSS = """
     <style>
@@ -372,11 +437,17 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
     .wea-tip .wea-tt::after { content:""; position:absolute; top:100%; left:50%;
                margin-left:-6px; border-width:6px; border-style:solid;
                border-color:#1a1a2e transparent transparent transparent; }
-    #wea-progress { position:fixed !important; top:0 !important; left:0 !important;
-                    right:0 !important; z-index:999 !important;
-                    padding:0 !important; margin:0 !important; }
-    #wea-progress > div { border-radius:0 !important; }
-    .gradio-container { padding-top:32px !important; }
+    #wea-fixed-bar { position:fixed !important; top:0 !important; left:0 !important;
+                     right:0 !important; z-index:999 !important;
+                     padding:0 !important; margin:0 !important;
+                     background:#111 !important; gap:0 !important;
+                     border-bottom:1px solid #333; }
+    #wea-fixed-bar > div { gap:0 !important; padding:0 !important; margin:0 !important; }
+    #wea-progress { padding:0 !important; margin:0 !important; min-height:0 !important; }
+    #wea-progress > div { border-radius:0 !important; padding:0 !important; margin:0 !important; }
+    #wea-timeline { padding:0 !important; margin:0 !important; min-height:0 !important; }
+    #wea-timeline > div { padding:0 4px !important; margin:0 !important; }
+    .gradio-container { padding-top:64px !important; }
     #wea-discussion textarea { height:560px !important; min-height:560px !important; }
     </style>
     """
@@ -447,10 +518,20 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         gr.Markdown("# Weather Event Analyzer")
         gr.HTML(TOOLTIP_CSS)
 
-        progress_bar = gr.HTML(
-            value='<div style="position:relative;background:#222;border-radius:6px;height:28px;overflow:hidden"><div style="background:#2a7a3a;height:100%;width:0%;transition:width 0.3s"></div><div style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#ccc;font-weight:bold">Ready</div></div>',
-            elem_id="wea-progress",
-        )
+        with gr.Column(elem_id="wea-fixed-bar"):
+            progress_bar = gr.HTML(
+                value='<div style="position:relative;background:#222;border-radius:6px;height:28px;overflow:hidden"><div style="background:#2a7a3a;height:100%;width:0%;transition:width 0.3s"></div><div style="position:absolute;top:0;left:0;right:0;bottom:0;display:flex;align-items:center;justify-content:center;font-size:12px;color:#ccc;font-weight:bold">Ready</div></div>',
+                elem_id="wea-progress",
+            )
+            timeline = gr.HTML(
+                value=0,
+                frame_count=0,
+                labels_json="[]",
+                html_template=TIMELINE_HTML_TEMPLATE,
+                css_template=TIMELINE_CSS,
+                js_on_load=TIMELINE_JS,
+                elem_id="wea-timeline",
+            )
 
         with gr.Row():
             with gr.Column(scale=1):
@@ -474,14 +555,6 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 gr.HTML(f'<div style="margin-bottom:4px"><b>Satellite Imagery</b> {TIP_SAT}</div>')
                 sat_image = gr.Image(label="Satellite Imagery", type="pil", height=520,
                                      show_label=False)
-                timeline = gr.HTML(
-                    value=0,
-                    frame_count=0,
-                    labels_json="[]",
-                    html_template=TIMELINE_HTML_TEMPLATE,
-                    css_template=TIMELINE_CSS,
-                    js_on_load=TIMELINE_JS,
-                )
 
         gr.HTML(f'<h3 style="margin:12px 0 4px">Time Series</h3>')
         with gr.Row():
@@ -534,7 +607,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         timeline.change(
             fn=on_frame_change,
             inputs=[timeline],
-            outputs=[sat_image, timeline, cape_plot, temp_plot, wind_plot,
+            outputs=[sat_image, cape_plot, temp_plot, wind_plot,
                      resolved, status_log, alerts_table,
                      sounding_plot, hodo_plot, discussion_box, synoptic_label,
                      progress_bar],

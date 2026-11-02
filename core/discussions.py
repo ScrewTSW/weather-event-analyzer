@@ -60,7 +60,7 @@ class MesoscaleDiscussionClient:
         dispatch = {
             "spc_md": self._fetch_spc_md,
             "spc_outlook": self._fetch_spc_outlook,
-            "estofex": self._fetch_estofex,
+            "estofex": lambda: self._fetch_estofex(date),
             "eccc": self._fetch_eccc,
             "bom": self._fetch_bom,
             "jma": self._fetch_jma,
@@ -118,7 +118,7 @@ class MesoscaleDiscussionClient:
         cached = self.req.fetch_or_compute("json/discussion/spc_outlook.json", _compute, ttl=3600)
         return [Discussion(**cached)] if cached else []
 
-    def _fetch_estofex(self):
+    def _fetch_estofex(self, date=""):
         def _compute():
             raw = self.req.fetch_text("https://www.estofex.org/cgi-bin/polygon/showforecast.cgi?text=yes")
             text = _clean_html(raw)
@@ -130,6 +130,22 @@ class MesoscaleDiscussionClient:
             ))
 
         cached = self.req.fetch_or_compute("json/discussion/estofex.json", _compute, ttl=7200)
+        if cached and date:
+            disc = Discussion(**cached)
+            valid_match = re.search(
+                r'(\d{1,2}\s+\w+\s+\d{4})\s+\d{2}:\d{2}\s+to\s+(\d{1,2}\s+\w+\s+\d{4})',
+                disc.text)
+            if valid_match:
+                from datetime import datetime
+                try:
+                    start = datetime.strptime(valid_match.group(1), "%d %b %Y").strftime("%Y-%m-%d")
+                    end = datetime.strptime(valid_match.group(2), "%d %b %Y").strftime("%Y-%m-%d")
+                    if date < start or date > end:
+                        period = f"{valid_match.group(1)} to {valid_match.group(2)}"
+                        disc.text = f"⚠ This forecast covers {period}, not the requested date {date}.\n\n{disc.text}"
+                except ValueError:
+                    pass
+            return [disc]
         return [Discussion(**cached)] if cached else []
 
     def _fetch_eccc(self):

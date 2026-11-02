@@ -249,6 +249,94 @@ def fetch_openmeteo_gridded(lat, lon, date, hour=12, bbox_deg=10, step=2.0):
     return temp_grid, dew_grid, u_grid, v_grid, lats_1d, lons_1d
 
 
+def fetch_pressure_field(lat, lon, date, hour=12, bbox_deg=20, step=2.0):
+    south = max(lat - bbox_deg, -90)
+    north = min(lat + bbox_deg, 90)
+    west = lon - bbox_deg
+    east = lon + bbox_deg
+
+    lats_1d = np.arange(south, north + step / 2, step)
+    lons_1d = np.arange(west, east + step / 2, step)
+    ny, nx = len(lats_1d), len(lons_1d)
+
+    all_lats = []
+    all_lons = []
+    for la in lats_1d:
+        for lo in lons_1d:
+            all_lats.append(la)
+            all_lons.append(lo)
+
+    lat_str = ",".join(f"{la:.2f}" for la in all_lats)
+    lon_str = ",".join(f"{lo:.2f}" for lo in all_lons)
+
+    url = (
+        f"https://api.open-meteo.com/v1/forecast?"
+        f"latitude={lat_str}&longitude={lon_str}"
+        f"&hourly=pressure_msl"
+        f"&past_days=7&wind_speed_unit=ms"
+    )
+
+    from core.api_request import CachedRequest
+    req = CachedRequest()
+    data = req.fetch_json(url)
+
+    target_time = f"{date}T{hour:02d}:00"
+    points = data if isinstance(data, list) else [data]
+
+    mslp_grid = np.full((ny, nx), np.nan)
+    for idx, pt in enumerate(points):
+        row = idx // nx
+        col = idx % nx
+        if row >= ny or col >= nx:
+            break
+        hourly = pt.get("hourly", {})
+        times = hourly.get("time", [])
+        t_idx = None
+        for ti, ts in enumerate(times):
+            if target_time in ts:
+                t_idx = ti
+                break
+        if t_idx is None:
+            continue
+        vals = hourly.get("pressure_msl", [])
+        if t_idx < len(vals) and vals[t_idx] is not None:
+            mslp_grid[row, col] = vals[t_idx]
+
+    return mslp_grid, lats_1d, lons_1d
+
+
+def find_pressure_extrema(lat, lon, date, hour=12, bbox_deg=20):
+    from scipy.ndimage import minimum_filter, maximum_filter
+
+    step = max(2.0, bbox_deg / 10)
+    mslp, lats, lons = fetch_pressure_field(lat, lon, date, hour, bbox_deg, step)
+
+    if np.all(np.isnan(mslp)):
+        return []
+
+    filled = np.where(np.isnan(mslp), np.nanmean(mslp), mslp)
+    smoothed = gaussian_filter(filled, sigma=1.5)
+
+    radius = max(3, int(3.0 / step))
+    size = 2 * radius + 1
+
+    local_min = minimum_filter(smoothed, size=size)
+    local_max = maximum_filter(smoothed, size=size)
+
+    extrema = []
+    for i in range(len(lats)):
+        for j in range(len(lons)):
+            if np.isnan(mslp[i, j]):
+                continue
+            val = smoothed[i, j]
+            if val == local_min[i, j]:
+                extrema.append((float(lats[i]), float(lons[j]), "L", float(val)))
+            elif val == local_max[i, j]:
+                extrema.append((float(lats[i]), float(lons[j]), "H", float(val)))
+
+    return extrema
+
+
 class FrontalAnalyzer:
     def analyze(self, temp, dewpoint, u, v, lats, lons):
         all_fronts = []
