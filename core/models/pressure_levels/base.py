@@ -16,6 +16,7 @@ class PressureLevelSnapshot(BaseDataResult):
     geopotential_height: list[float | None] = field(default_factory=list)
     latitude: float | None = None
     longitude: float | None = None
+    elevation: float | None = None  # surface height MSL (m); levels below it are extrapolated
 
     def cache_key(self) -> str:
         return f"json/pressure/{self.source}/{self.latitude}_{self.longitude}_{self.synoptic_time}.json"
@@ -32,6 +33,7 @@ class PressureLevelHourly(BaseDataResult):
     geopotential_height: list[list[float | None]] = field(default_factory=list)
     latitude: float | None = None
     longitude: float | None = None
+    elevation: float | None = None  # surface height MSL (m); levels below it are extrapolated
 
     def cache_key(self) -> str:
         date = self.timestamps[0][:10] if self.timestamps else "unknown"

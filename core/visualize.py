@@ -15,6 +15,7 @@ from PIL import Image, ImageDraw, ImageFont
 from datetime import datetime
 from pathlib import Path
 import matplotlib.pyplot as plt
+import matplotlib.patheffects as PathEffects
 import imageio
 
 try:
@@ -247,6 +248,72 @@ def render_map_view(center_lat, center_lon, bbox_deg=20.0, date=None,
     return Image.open(buf).convert("RGBA")
 
 
+def render_geo_overlay(width, height, center_lat, center_lon, bbox_deg=20.0, fronts=None, pressure_extrema=None):
+    """Render coastlines/borders/fronts as a transparent RGBA overlay. Call once, composite onto each frame."""
+    if not HAS_CARTOPY:
+        return Image.new("RGBA", (width, height), (0, 0, 0, 0))
+
+    half = bbox_deg / 2
+    west = center_lon - half
+    east = center_lon + half
+    south = max(center_lat - half, -65.0)
+    north = min(center_lat + half, 65.0)
+    map_crs = ccrs.PlateCarree()
+
+    dpi = 100
+    fig = plt.figure(figsize=(width / dpi, height / dpi), dpi=dpi)
+    ax = fig.add_axes([0, 0, 1, 1], projection=map_crs)
+    ax.set_extent([west, east, south, north], crs=map_crs)
+    ax.set_facecolor('none')
+    fig.patch.set_alpha(0)
+    ax.patch.set_alpha(0)
+
+    ax.coastlines(resolution='50m', color='cyan', linewidth=0.8, alpha=0.8, zorder=5)
+    ax.add_feature(cfeature.BORDERS, linewidth=0.5, edgecolor='cyan', alpha=0.5, zorder=5)
+    ax.add_feature(cfeature.LAKES, facecolor='none', edgecolor='cyan', linewidth=0.5, alpha=0.6, zorder=5)
+    ax.add_feature(cfeature.STATES, linewidth=0.3, edgecolor='cyan', alpha=0.3, zorder=5)
+    ax.plot(center_lon, center_lat, '+', color='yellow', markersize=12,
+            markeredgewidth=2, transform=map_crs, zorder=10)
+
+    if fronts:
+        for front in fronts:
+            if len(front.lats) < 2:
+                continue
+            if front.is_merger:
+                ax.plot(front.lons, front.lats, color='magenta', linewidth=4, transform=map_crs, zorder=8)
+                mid = len(front.lats) // 2
+                ax.plot(front.lons[mid], front.lats[mid], '*', color='magenta', markersize=15, transform=map_crs, zorder=9)
+                ax.text(front.lons[mid], front.lats[mid], f' {front.label}', color='magenta', fontsize=8, fontweight='bold', transform=map_crs, zorder=9)
+            elif front.type == "cold":
+                ax.plot(front.lons, front.lats, color='blue', linewidth=2.5, transform=map_crs, zorder=7)
+                for k in range(0, len(front.lats), max(1, len(front.lats) // 8)):
+                    ax.plot(front.lons[k], front.lats[k], '^', color='blue', markersize=6, transform=map_crs, zorder=8)
+            elif front.type == "warm":
+                ax.plot(front.lons, front.lats, color='red', linewidth=2.5, transform=map_crs, zorder=7)
+                for k in range(0, len(front.lats), max(1, len(front.lats) // 8)):
+                    ax.plot(front.lons[k], front.lats[k], 'o', color='red', markersize=5, transform=map_crs, zorder=8)
+            elif front.type == "dry":
+                ax.plot(front.lons, front.lats, color='orange', linewidth=2, linestyle='--', transform=map_crs, zorder=7)
+
+    if pressure_extrema:
+        for plat, plon, marker_type, pressure_hpa in pressure_extrema:
+            color = '#55AAFF' if marker_type == 'L' else '#FF5555'
+            ax.text(plon, plat, marker_type, fontsize=32, fontweight='bold',
+                    color=color, ha='center', va='center',
+                    transform=map_crs, zorder=11,
+                    path_effects=[PathEffects.withStroke(linewidth=4, foreground='black')])
+            ax.text(plon, plat - (bbox_deg / 20), f'{pressure_hpa:.0f}',
+                    fontsize=12, color=color, ha='center', va='top',
+                    transform=map_crs, zorder=11,
+                    path_effects=[PathEffects.withStroke(linewidth=3, foreground='black')])
+
+    buf = io.BytesIO()
+    fig.savefig(buf, format='png', dpi=dpi, pad_inches=0, transparent=True)
+    plt.close(fig)
+    buf.seek(0)
+    return Image.open(buf).convert("RGBA")
+
+
 def add_geo_overlay(img, center_lat, center_lon, bbox_deg=20.0, fronts=None):
     """Overlay coastlines, borders, and target marker on a pre-projected satellite image."""
     if not HAS_CARTOPY:
@@ -348,6 +415,27 @@ def compose_frame(satellite_image, timestamp, satellite_name, location_str,
     return frame
 
 
+def _above_ground(heights_m, elevation):
+    """Mask of pressure levels at or above the terrain, and the surface height used.
+
+    Open-Meteo extrapolates levels that lie below the ground (e.g. 1000/975 hPa
+    at 399 m Wichita). Lifting a parcel or integrating helicity from them uses
+    air that doesn't exist. Without an elevation the lowest level is the surface.
+    """
+    h = np.asarray(heights_m, dtype=float)
+    sfc = elevation if elevation is not None else np.nanmin(h)
+    return np.isfinite(h) & (h >= sfc), sfc
+
+
+def _bunkers_srh(pressure, u, v, agl, depth_m, bottom_m=0.0):
+    """Storm-relative helicity (m²/s²) relative to the Bunkers right-mover."""
+    rm, _, _ = mpcalc.bunkers_storm_motion(pressure, u, v, agl)
+    _, _, total = mpcalc.storm_relative_helicity(
+        agl, u, v, depth=depth_m * units.meter, bottom=bottom_m * units.meter,
+        storm_u=rm[0], storm_v=rm[1])
+    return float(total.magnitude)
+
+
 def create_atmosphere_chart(data, chart_type, profile_hourly=None):
     """Create atmospheric data charts.
 
@@ -387,12 +475,15 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
             if profile_hourly is not None and profile_hourly.timestamps:
                 cape_vals = []
                 cin_vals = []
-                p_lvl = np.array(profile_hourly.pressure_levels, dtype=float) * units.hPa
+                p_lvl = np.array(profile_hourly.pressure_levels, dtype=float)
                 for t_idx in range(len(profile_hourly.timestamps)):
                     try:
-                        t_prof = np.array(profile_hourly.temperature[t_idx], dtype=float) * units.degC
-                        td_prof = np.array(profile_hourly.dewpoint[t_idx], dtype=float) * units.degC
-                        sb_cape, sb_cin = mpcalc.surface_based_cape_cin(p_lvl, t_prof, td_prof)
+                        above, _ = _above_ground(profile_hourly.geopotential_height[t_idx],
+                                                 profile_hourly.elevation)
+                        t_prof = np.array(profile_hourly.temperature[t_idx], dtype=float)[above] * units.degC
+                        td_prof = np.array(profile_hourly.dewpoint[t_idx], dtype=float)[above] * units.degC
+                        sb_cape, sb_cin = mpcalc.surface_based_cape_cin(
+                            p_lvl[above] * units.hPa, t_prof, td_prof)
                         cape_vals.append(float(sb_cape.magnitude))
                         cin_vals.append(float(sb_cin.magnitude))
                     except Exception:
@@ -400,6 +491,7 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
                         cin_vals.append(np.nan)
                 cape_data = np.array(cape_vals)
                 cin_data = np.array(cin_vals)
+                timestamps = profile_hourly.timestamps
                 time_objects = []
                 for ts in profile_hourly.timestamps:
                     try:
@@ -442,27 +534,27 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
             try:
                 srh_3km = []
                 srh_1km = []
-                p_levels = np.array(profile_hourly.pressure_levels, dtype=float) * units.hPa
-                for t_idx in range(len(profile_hourly.timestamps)):
-                    ws = np.array(profile_hourly.wind_speed[t_idx], dtype=float) * units('m/s')
-                    wd = np.array(profile_hourly.wind_direction[t_idx], dtype=float) * units.degrees
-                    ht = np.array(profile_hourly.geopotential_height[t_idx], dtype=float) * units.meter
+                p_levels = np.array(profile_hourly.pressure_levels, dtype=float)
+                # Same hours as CAPE/CIN — the pressure-level response spans
+                # ~2 weeks and would squash the 24 h CAPE trace into a sliver
+                cape_hours = set(timestamps)
+                srh_idx = [i for i, ts in enumerate(profile_hourly.timestamps) if ts in cape_hours]
+                for t_idx in srh_idx:
+                    ht = np.array(profile_hourly.geopotential_height[t_idx], dtype=float)
+                    above, sfc = _above_ground(ht, profile_hourly.elevation)
+                    ws = np.array(profile_hourly.wind_speed[t_idx], dtype=float)[above] * units('m/s')
+                    wd = np.array(profile_hourly.wind_direction[t_idx], dtype=float)[above] * units.degrees
+                    agl = (ht[above] - sfc) * units.meter
+                    p_t = p_levels[above] * units.hPa
                     u_t, v_t = mpcalc.wind_components(ws, wd)
-                    try:
-                        pos3, neg3, total3 = mpcalc.storm_relative_helicity(
-                            ht, u_t, v_t, depth=3000 * units.meter)
-                        srh_3km.append(float(total3.magnitude))
-                    except Exception:
-                        srh_3km.append(np.nan)
-                    try:
-                        pos1, neg1, total1 = mpcalc.storm_relative_helicity(
-                            ht, u_t, v_t, depth=1000 * units.meter)
-                        srh_1km.append(float(total1.magnitude))
-                    except Exception:
-                        srh_1km.append(np.nan)
+                    for depth, series in ((3000, srh_3km), (1000, srh_1km)):
+                        try:
+                            series.append(_bunkers_srh(p_t, u_t, v_t, agl, depth))
+                        except Exception:
+                            series.append(np.nan)
 
                 srh_times = []
-                for ts in profile_hourly.timestamps:
+                for ts in (profile_hourly.timestamps[i] for i in srh_idx):
                     try:
                         srh_times.append(datetime.fromisoformat(ts.replace("Z", "+00:00")))
                     except Exception:
@@ -546,6 +638,17 @@ def create_sounding_chart(profile_data):
     td_raw = np.array(profile_data.dewpoint, dtype=float)
     ws_raw = np.array(profile_data.wind_speed, dtype=float)
     wd_raw = np.array(profile_data.wind_direction, dtype=float)
+    h_raw = np.array(profile_data.geopotential_height, dtype=float)
+
+    # The parcel starts at the lowest real level, not an extrapolated one
+    if len(h_raw) == len(p_raw):
+        above, sfc_hgt = _above_ground(h_raw, profile_data.elevation)
+        p_raw, t_raw, td_raw = p_raw[above], t_raw[above], td_raw[above]
+        ws_raw, wd_raw, h_raw = ws_raw[above], wd_raw[above], h_raw[above]
+    else:
+        sfc_hgt = profile_data.elevation or 0.0
+        h_raw = np.full(len(p_raw), np.nan)
+    agl_raw = h_raw - sfc_hgt
 
     # Interpolate in log-pressure space; PCHIP preserves monotonicity
     # and avoids overshooting artifacts in dewpoint dry layers
@@ -667,14 +770,68 @@ def create_sounding_chart(profile_data):
                      fontfamily='monospace',
                      bbox=dict(boxstyle='round,pad=0.4', facecolor='black', alpha=0.7))
 
-    # SFC label with I-beam and height
-    sfc_hgt = profile_data.geopotential_height[0] if profile_data.geopotential_height else 0
+    # Effective Inflow Layer I-beam with SRH
     sfc_p = pressure[0].magnitude
-    skew.ax.axhline(sfc_p, color='white', linewidth=1.5, linestyle='-', alpha=0.5)
-    skew.ax.text(1.02, sfc_p,
-                 f'SFC {sfc_hgt:.0f}m', color='white', fontsize=8,
-                 va='center', ha='left', fontweight='bold',
-                 transform=ytrans, clip_on=False)
+
+    # Find EIL: levels where CAPE >= 100 and CIN >= -250 (heights AGL)
+    eil_bottom_p = None
+    eil_top_p = None
+    eil_bottom_h = None
+    eil_top_h = None
+    try:
+        for k in range(len(pressure)):
+            p_k = pressure[k:]
+            t_k = temperature[k:]
+            td_k = dewpoint[k:]
+            if len(p_k) < 3:
+                break
+            try:
+                cape_k, cin_k = mpcalc.surface_based_cape_cin(p_k, t_k, td_k)
+                if cape_k.magnitude >= 100 and cin_k.magnitude >= -250:
+                    if eil_bottom_p is None:
+                        eil_bottom_p = pressure[k].magnitude
+                        eil_bottom_h = agl_raw[k]
+                    eil_top_p = pressure[k].magnitude
+                    eil_top_h = agl_raw[k]
+            except Exception:
+                continue
+    except Exception:
+        pass
+
+    if eil_bottom_p and eil_top_p and eil_bottom_p != eil_top_p:
+        eil_depth = eil_top_h - eil_bottom_h
+        # Effective SRH over the inflow layer (not from the surface)
+        try:
+            eff_srh = _bunkers_srh(pressure, u, v, agl_raw * units.meter,
+                                   eil_depth, bottom_m=eil_bottom_h - agl_raw[0])
+        except Exception:
+            eff_srh = 0
+
+        # Draw I-beam: vertical bar + top/bottom serifs on the LEFT side
+        x_pos = 0.28
+        skew.ax.plot([x_pos, x_pos], [eil_bottom_p, eil_top_p], color='#FF88DD',
+                     linewidth=2.5, transform=ytrans, clip_on=False, zorder=20)
+        skew.ax.plot([x_pos - 0.008, x_pos + 0.008], [eil_bottom_p, eil_bottom_p],
+                     color='#FF88DD', linewidth=2.5, transform=ytrans, clip_on=False, zorder=20)
+        skew.ax.plot([x_pos - 0.008, x_pos + 0.008], [eil_top_p, eil_top_p],
+                     color='#FF88DD', linewidth=2.5, transform=ytrans, clip_on=False, zorder=20)
+
+        # SFC height label at bottom
+        skew.ax.text(x_pos + 0.015, eil_bottom_p,
+                     f'SFC {sfc_hgt:.0f}m', color='#FF88DD', fontsize=7,
+                     va='center', ha='left', fontweight='bold',
+                     transform=ytrans, clip_on=False)
+        # EIL top height + effective SRH
+        skew.ax.text(x_pos + 0.015, eil_top_p,
+                     f'{eil_depth:.0f}m  {eff_srh:.0f} m²/s²', color='#FF88DD', fontsize=7,
+                     va='center', ha='left', fontweight='bold',
+                     transform=ytrans, clip_on=False)
+    else:
+        # No EIL found — just show SFC marker
+        skew.ax.text(0.0, sfc_p,
+                     f' SFC {sfc_hgt:.0f}m', color='#FF88DD', fontsize=7,
+                     va='center', ha='right', fontweight='bold',
+                     transform=ytrans, clip_on=False)
 
     skew.plot_dry_adiabats(alpha=0.8, linewidth=0.8, colors='#CC6644')
     skew.plot_moist_adiabats(alpha=0.7, linewidth=0.8, colors='#44AA66')
@@ -696,7 +853,7 @@ def create_sounding_chart(profile_data):
 
     # Highlight the 0°C and -20°C isotherms (diagonal lines on Skew-T)
     skew.ax.axvline(0, color='#00FFFF', linewidth=2, linestyle=':', alpha=0.8, zorder=5)
-    skew.ax.axvline(-20, color='#AA00FF', linewidth=2, linestyle=':', alpha=0.8, zorder=5)
+    skew.ax.axvline(-20, color='#FF88DD', linewidth=2, linestyle=':', alpha=0.8, zorder=5)
 
     skew.ax.set_ylim(1050, 100)
     skew.ax.set_xlim(-40, 50)
@@ -739,17 +896,29 @@ def create_hodograph_chart(profile_data):
     u_kt = u.magnitude * MS_TO_KT
     v_kt = v.magnitude * MS_TO_KT
 
-    max_wind_kt = max(float(wind_speed.max().magnitude) * MS_TO_KT, 40)
+    # Heights AGL. Open-Meteo extrapolates levels below the surface (e.g.
+    # 1000/975 hPa at 399 m Wichita) — drop them. Cap at 12 km AGL so the
+    # hodograph and barb column show exactly the same levels.
+    HODO_TOP_M = 12000
+    height_m = heights.magnitude
+    above, sfc_m = _above_ground(height_m, profile_data.elevation)
+    agl_m = height_m - sfc_m
+    keep = above & np.isfinite(u_kt) & np.isfinite(v_kt) & (agl_m <= HODO_TOP_M)
+    agl_k, u_k, v_k = agl_m[keep], u_kt[keep], v_kt[keep]
+
+    max_wind_kt = max(float(np.hypot(u_k, v_k).max()) if keep.any() else 0, 40)
     ring_max = int(np.ceil(max_wind_kt / 20) * 20) + 20
 
     fig = plt.figure(figsize=(9, 7), dpi=150)
     ax = fig.add_axes([0.08, 0.08, 0.68, 0.84])
     h = Hodograph(ax, component_range=ring_max)
     h.add_grid(increment=20)
+    ring_ticks = np.arange(-ring_max, ring_max + 1, 20)
+    ax.set_xticks(ring_ticks)
+    ax.set_yticks(ring_ticks)
 
-    height_m = heights.magnitude
     bands = [
-        (0, 500, '#AA00FF', 3.5, '0-0.5 km'),
+        (0, 500, '#FF88DD', 3.5, '0-0.5 km'),
         (500, 1000, 'red', 3.0, '0.5-1 km'),
         (1000, 3000, 'orange', 2.0, '1-3 km'),
         (3000, 6000, 'yellow', 1.5, '3-6 km'),
@@ -757,38 +926,32 @@ def create_hodograph_chart(profile_data):
         (9000, 99999, 'deepskyblue', 1.0, '9+ km'),
     ]
 
-    from scipy.interpolate import interp1d
-    u_mag = u_kt
-    v_mag = v_kt
-    valid = np.isfinite(u_mag) & np.isfinite(v_mag) & np.isfinite(height_m)
-    if valid.sum() >= 4:
-        u_interp = interp1d(height_m[valid], u_mag[valid], kind='cubic',
-                            bounds_error=False, fill_value='extrapolate')
-        v_interp = interp1d(height_m[valid], v_mag[valid], kind='cubic',
-                            bounds_error=False, fill_value='extrapolate')
-        h_fine = np.arange(height_m[valid].min(), min(height_m[valid].max(), 12000), 50)
+    # PCHIP (as in the Skew-T) stays between neighbouring data points —
+    # cubic splines overshoot and draw loops that aren't in the data.
+    from scipy.interpolate import PchipInterpolator
+    if len(agl_k) >= 2:
+        u_interp = PchipInterpolator(agl_k, u_k)
+        v_interp = PchipInterpolator(agl_k, v_k)
+        h_fine = np.union1d(np.arange(agl_k[0], agl_k[-1], 50), agl_k)
 
         for low, high, color, lw, label in bands:
-            mask = (h_fine >= low) & (h_fine < high)
-            seg_h = h_fine[mask]
+            # Close each segment at the band edge so adjacent colours join
+            seg_h = h_fine[(h_fine >= low) & (h_fine <= high)]
             if len(seg_h) < 2:
                 continue
-            seg_u = u_interp(seg_h)
-            seg_v = v_interp(seg_h)
-            ax.plot(seg_u, seg_v, color=color, linewidth=lw, label=label, solid_capstyle='round')
+            ax.plot(u_interp(seg_h), v_interp(seg_h), color=color, linewidth=lw,
+                    label=label, solid_capstyle='round')
 
         for label_h in [500, 1000, 3000, 6000, 9000]:
-            if height_m[valid].min() <= label_h <= height_m[valid].max():
-                lu = float(u_interp(label_h))
-                lv = float(v_interp(label_h))
-                ax.annotate(f'{label_h/1000:.0f}km', (lu, lv), fontsize=7,
-                            color='white', fontweight='bold',
+            if agl_k[0] <= label_h <= agl_k[-1]:
+                ax.annotate(f'{label_h/1000:g}km',
+                            (float(u_interp(label_h)), float(v_interp(label_h))),
+                            fontsize=7, color='white', fontweight='bold',
                             xytext=(5, 5), textcoords='offset points')
-    else:
-        ax.plot(u_mag, v_mag, color='white', linewidth=1.5)
 
     try:
-        rm, lm, mean = mpcalc.bunkers_storm_motion(pressure, u, v, heights)
+        rm, lm, mean = mpcalc.bunkers_storm_motion(
+            pressure[keep], u[keep], v[keep], agl_k * units.meter)
         ax.plot(rm[0].magnitude * MS_TO_KT, rm[1].magnitude * MS_TO_KT, 'o',
                 color='magenta', markersize=10, zorder=10, label='RM')
         ax.plot(lm[0].magnitude * MS_TO_KT, lm[1].magnitude * MS_TO_KT, 'o',
@@ -805,55 +968,52 @@ def create_hodograph_chart(profile_data):
     ax.set_title(f"Hodograph — {synoptic}", fontsize=12)
     ax.legend(loc='upper right', fontsize=6, ncol=2)
 
-    # Wind barb column on the right — interpolated for density
+    # Wind barb column — sampled from the same PCHIP curve as the hodograph.
+    # Square-root height axis gives the lowest km ~30% of the column; barbs
+    # are evenly spaced on that axis, so the boundary layer is densely sampled.
+    BARB_COUNT = 20
     ax_barbs = fig.add_axes([0.77, 0.08, 0.10, 0.84])
-    u_kt_arr = u.to('knots').magnitude
-    v_kt_arr = v.to('knots').magnitude
-    p_arr = pressure.magnitude
-    log_p_arr = np.log(p_arr)
-
-    if valid.sum() >= 4:
-        log_p_fine_b = np.linspace(log_p_arr[0], log_p_arr[-1], len(p_arr) * 2)
-        # Ensure raw data points are included so surface isn't lost to interpolation
-        log_p_fine_b = np.unique(np.sort(np.concatenate([log_p_fine_b, log_p_arr])))
-        p_fine_b = np.exp(log_p_fine_b)
-        u_interp_b = interp1d(log_p_arr[valid], u_kt_arr[valid], kind='cubic',
-                               bounds_error=False, fill_value='extrapolate')
-        v_interp_b = interp1d(log_p_arr[valid], v_kt_arr[valid], kind='cubic',
-                               bounds_error=False, fill_value='extrapolate')
-        h_interp_b = interp1d(log_p_arr[valid], height_m[valid], kind='linear',
-                               bounds_error=False, fill_value='extrapolate')
-        u_fine_b = u_interp_b(log_p_fine_b)
-        v_fine_b = v_interp_b(log_p_fine_b)
-        h_fine_b = h_interp_b(log_p_fine_b)
-    else:
-        p_fine_b = p_arr
-        u_fine_b = u_kt_arr
-        v_fine_b = v_kt_arr
-        h_fine_b = height_m
-
-    for i in range(len(p_fine_b)):
-        hgt = h_fine_b[i]
-        barb_color = 'white'
-        for low, high, color, _, _ in bands:
-            if low <= hgt < high:
-                barb_color = color
-                break
-        ax_barbs.barbs(0, p_fine_b[i], u_fine_b[i], v_fine_b[i],
-                       color=barb_color, length=6, linewidth=0.7)
-    ax_barbs.set_yscale('log')
-    ax_barbs.set_ylim(1050, 100)
+    ax_barbs.set_yscale('function', functions=(lambda h: np.sqrt(np.clip(h, 0, None)), np.square))
+    if len(agl_k) >= 2:
+        barb_h = np.linspace(np.sqrt(agl_k[0]), np.sqrt(agl_k[-1]), BARB_COUNT) ** 2
+        for hgt, ub, vb in zip(barb_h, u_interp(barb_h), v_interp(barb_h)):
+            barb_color = 'white'
+            for low, high, color, _, _ in bands:
+                if low <= hgt < high:
+                    barb_color = color
+                    break
+            ax_barbs.barbs(0, hgt, ub, vb, color=barb_color, length=5.5,
+                           linewidth=0.7, clip_on=False)
+        ax_barbs.set_ylim(0, agl_k[-1] * 1.06)
     ax_barbs.set_xlim(-1, 1)
     ax_barbs.set_xticks([])
+    # Primary scale: hPa, each tick at that level's actual AGL height
+    p_k = pressure.magnitude[keep]
+    p_ticks = [(int(p), a) for p, a in zip(p_k, agl_k)
+               if int(p) in (925, 850, 700, 500, 400, 300, 250, 200)]
     ax_barbs.set_ylabel('hPa', fontsize=8)
     ax_barbs.yaxis.set_label_position('right')
     ax_barbs.yaxis.tick_right()
-    import matplotlib.ticker as mticker
-    ax_barbs.yaxis.set_major_formatter(mticker.ScalarFormatter())
-    ax_barbs.yaxis.set_minor_formatter(mticker.NullFormatter())
-    ax_barbs.set_yticks([1000, 925, 850, 700, 500, 300, 200, 100])
-    ax_barbs.set_yticklabels(['1000', '925', '850', '700', '500', '300', '200', '100'],
-                              fontsize=6)
+    ax_barbs.set_yticks([a for _, a in p_ticks])
+    ax_barbs.set_yticklabels([str(p) for p, _ in p_ticks], fontsize=7)
+    ax_barbs.yaxis.set_minor_locator(plt.NullLocator())
+
+    # Secondary scale: km AGL, further out and dimmer. twinx, not
+    # secondary_yaxis — the latter ignores the parent's sqrt scale.
+    km_ax = ax_barbs.twinx()
+    km_ax.set_yscale('function', functions=(lambda h: np.sqrt(np.clip(h, 0, None)), np.square))
+    km_ax.set_ylim(ax_barbs.get_ylim())
+    km_ax.spines['right'].set_position(('outward', 40))
+    ax_barbs.yaxis.tick_right()  # twinx moves the parent's ticks left
+    ax_barbs.yaxis.set_label_position('right')
+    km_ticks = [t for t in (0.5, 1, 2, 3, 6, 9, 12)
+                if len(agl_k) and t * 1000 <= agl_k[-1] * 1.06]
+    km_ax.set_yticks([t * 1000 for t in km_ticks])
+    km_ax.set_yticklabels([f'{t:g}' for t in km_ticks], fontsize=6, color='0.6')
+    km_ax.yaxis.set_minor_locator(plt.NullLocator())
+    km_ax.tick_params(colors='0.6')
+    km_ax.spines['right'].set_color('0.6')
+    km_ax.set_ylabel('km AGL', fontsize=7, color='0.6')
     ax_barbs.set_facecolor('black')
     ax_barbs.set_title('Wind', fontsize=9)
 

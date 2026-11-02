@@ -20,6 +20,22 @@ def snap_to_synoptic(hour: int) -> int:
     return distances[0][1]
 
 
+def extract_snapshot(hourly: PressureLevelHourly, idx: int) -> PressureLevelSnapshot:
+    return PressureLevelSnapshot(
+        source=hourly.source,
+        synoptic_time=hourly.timestamps[idx] if idx < len(hourly.timestamps) else "",
+        pressure_levels=hourly.pressure_levels,
+        temperature=hourly.temperature[idx],
+        dewpoint=hourly.dewpoint[idx],
+        wind_speed=hourly.wind_speed[idx],
+        wind_direction=hourly.wind_direction[idx],
+        geopotential_height=hourly.geopotential_height[idx],
+        latitude=hourly.latitude,
+        longitude=hourly.longitude,
+        elevation=hourly.elevation,
+    )
+
+
 class PressureLevelClient:
     def __init__(self, cache=None):
         self.req = CachedRequest(cache=cache)
@@ -65,6 +81,7 @@ class PressureLevelClient:
                 pressure_levels=list(PRESSURE_LEVELS),
                 latitude=data.get("latitude"),
                 longitude=data.get("longitude"),
+                elevation=data.get("elevation"),
                 **var_data
             )
         else:
@@ -83,6 +100,7 @@ class PressureLevelClient:
                 pressure_levels=list(PRESSURE_LEVELS),
                 latitude=data.get("latitude"),
                 longitude=data.get("longitude"),
+                elevation=data.get("elevation"),
                 timestamps=timestamps,
                 **var_data
             )
