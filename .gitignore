@@ -43,3 +43,4 @@ docs/superpowers/
 # OS
 .DS_Store
 Thumbs.db
+weather-event-analyzer.log
