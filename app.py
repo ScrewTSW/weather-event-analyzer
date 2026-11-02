@@ -2,6 +2,8 @@
 import json
 import re
 import tempfile
+import threading
+from datetime import datetime
 from pathlib import Path
 
 import io
@@ -135,8 +137,52 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
     frontal_analyzer = FrontalAnalyzer()
 
     state = {"composed_frames": [], "frame_labels": [], "profile_hourly": None,
-             "sounding_by_hour": {}, "hodo_by_hour": {},
+             "hour_index": {}, "sounding_by_hour": {}, "hodo_by_hour": {},
              "shown_idx": None, "shown_hour": None}
+    # Soundings render on demand (fetch_data streaming + timeline scrubbing);
+    # pyplot is not thread-safe, so both paths share one lock.
+    render_lock = threading.Lock()
+
+    def nearest_hour(when):
+        """Hour (since 00 UTC on the event date) with profile data closest to a
+        'YYYY-MM-DD HH:MM[...]' time — None if there is no profile data."""
+        hours = state["hour_index"]
+        if not hours:
+            return None
+        try:
+            t = datetime.strptime(when.strip()[:16], "%Y-%m-%d %H:%M")
+            minutes = (t - state["day0"]).total_seconds() / 60
+        except (ValueError, TypeError):
+            minutes = 12 * 60
+        return min(hours, key=lambda hr: abs(hr * 60 - minutes))
+
+    def sounding_label(h):
+        station = state["profile_hourly"].station if state["profile_hourly"] else None
+        return (f"Sounding time: {h % 24:02d}:00 UTC" + (" (next day)" if h >= 24 else "")
+                + (f" — RAOB {station}" if station else ""))
+
+    def render_sounding(h):
+        with render_lock:
+            if h not in state["sounding_by_hour"]:
+                profile = extract_snapshot(state["profile_hourly"], state["hour_index"][h])
+                state["sounding_by_hour"][h] = _fig_to_pil(create_sounding_chart(profile))
+        return state["sounding_by_hour"][h]
+
+    def render_hodo(h):
+        with render_lock:
+            if h not in state["hodo_by_hour"]:
+                profile = extract_snapshot(state["profile_hourly"], state["hour_index"][h])
+                state["hodo_by_hour"][h] = _fig_to_pil(create_hodograph_chart(profile))
+        return state["hodo_by_hour"][h]
+
+    def sounding_update(frame_label):
+        """Sounding/hodograph/label for the hour closest to a frame — {} if already shown."""
+        h = nearest_hour(frame_label)
+        if h is None or h == state["shown_hour"]:
+            return {}
+        state["shown_hour"] = h
+        return {"sounding": render_sounding(h), "hodo": render_hodo(h),
+                "synoptic_label": sounding_label(h)}
 
     def fetch_data(location_str, date, start_utc, end_utc, zoom, product, show_fronts):
         log_lines = []
@@ -199,7 +245,7 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             # Clear the previous run and put every output on the stopwatch
             composed, labels = [], []
             state.update(composed_frames=composed, frame_labels=labels,
-                         profile_hourly=None, sounding_by_hour={}, hodo_by_hour={},
+                         profile_hourly=None, hour_index={}, sounding_by_hour={}, hodo_by_hour={},
                          shown_idx=None, shown_hour=None)
             blank = {"image": None, "cape": None, "temp": None, "wind": None,
                      "sounding": None, "hodo": None, "discussion": "", "alerts": []}
@@ -279,36 +325,36 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 log(f"{hourly_tag} pressure hourly ({len(profile_hourly.timestamps)}h)")
                 state["profile_hourly"] = profile_hourly
 
-                hours = []
+                if profile_hourly.station:
+                    log(f"Observed soundings: {profile_hourly.station} "
+                        f"({profile_hourly.distance_km} km) at "
+                        + ", ".join(ts[5:].replace("T", " ") for ts in profile_hourly.timestamps))
+                elif not profile_hourly.timestamps:
+                    log(f"No pressure-level data for {date}")
+                # Hours since 00 UTC on `date` — next-day 00 UTC radiosonde is hour 24
+                hour_index = {}
+                day0 = state["day0"] = datetime.fromisoformat(date)
                 for i, ts in enumerate(profile_hourly.timestamps):
                     try:
-                        hours.append((int(ts.split("T")[1].split(":")[0]), i))
-                    except (ValueError, IndexError):
+                        delta = datetime.fromisoformat(ts) - day0
+                        hour_index[int(delta.total_seconds() // 3600)] = i
+                    except ValueError:
                         continue
-                # Synoptic hour first so it is on screen while the rest render
-                hours.sort(key=lambda hi: hi[0] != synoptic_h)
+                state["hour_index"] = hour_index
 
-                sounding_by_hour = state["sounding_by_hour"]
-                hodo_by_hour = state["hodo_by_hour"]
-                for n, (h, i) in enumerate(hours):
-                    profile = extract_snapshot(profile_hourly, i)
-                    sounding_by_hour[h] = _fig_to_pil(create_sounding_chart(profile))
-                    if n == 0:
-                        state["shown_hour"] = h
-                        synoptic_label = f"Sounding time: {h:02d}:00 UTC"
-                        yield step("Rendering hodograph...", 30,
-                                   sounding=sounding_by_hour[h], synoptic_label=synoptic_label)
-                    hodo_by_hour[h] = _fig_to_pil(create_hodograph_chart(profile))
-                    if n == 0:
-                        yield step("Adding helicity to CAPE / CIN...", 33, hodo=hodo_by_hour[h])
-                        cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin", profile_hourly=profile_hourly))
-                        has_cape = "cape" in atmo.variables
-                        log("Helicity added to CAPE/CIN chart" + ("" if has_cape else " (CAPE computed from profiles)"))
-                        yield step(f"Pre-rendering soundings 1/{len(hours)}...", 36, cape=cape)
-                    else:
-                        yield step(f"Pre-rendering soundings {n + 1}/{len(hours)}...",
-                                   36 + 24 * (n + 1) // len(hours))
-                log(f"Pre-rendered {len(sounding_by_hour)} soundings & hodographs")
+                # Only the hour closest to the window start renders now; the
+                # rest render as satellite frames that need them stream in
+                h = nearest_hour(f"{date} {start_utc}")
+                if h is not None:
+                    state["shown_hour"] = h
+                    synoptic_label = sounding_label(h)
+                    yield step("Rendering hodograph...", 30,
+                               sounding=render_sounding(h), synoptic_label=synoptic_label)
+                    yield step("Adding helicity to CAPE / CIN...", 33, hodo=render_hodo(h))
+                    cape = _fig_to_pil(create_atmosphere_chart(atmo, "cape_cin", profile_hourly=profile_hourly))
+                    has_cape = "cape" in atmo.variables
+                    log("Helicity added to CAPE/CIN chart" + ("" if has_cape else " (CAPE computed from profiles)"))
+                    yield step("Fetching mesoscale discussions...", 36, cape=cape)
             except Exception as e:
                 log(f"Sounding/Hodograph failed: {e}")
             # Stop the stopwatch even if nothing rendered
@@ -388,7 +434,8 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                            72 + 23 * done // len(timestamps),
                            image=img,
                            timeline=gr.HTML(value=idx, labels_json=json.dumps(labels),
-                                            frame_count=len(labels)))
+                                            frame_count=len(labels)),
+                           **sounding_update(label))
 
             # 6. Alerts (last — slowest due to multiple external sources)
             log("Fetching alerts...")
@@ -401,6 +448,8 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
             log(f"{alert_tag} {len(alerts_raw)} alerts")
 
             log("Done.")
+            if state["shown_hour"] is not None:
+                synoptic_label = sounding_label(state["shown_hour"])
             yield step(f"Ready — {synoptic_label}", 100, alerts=_format_alerts(alerts_raw))
 
         except Exception as e:
@@ -428,23 +477,9 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
         frame_out = skip if idx == state["shown_idx"] else frames[idx]
         state["shown_idx"] = idx
 
-        sounding_map = state.get("sounding_by_hour", {})
-        hodo_map = state.get("hodo_by_hour", {})
-        if sounding_map and idx < len(labels):
-            parts = labels[idx].strip().split(" ")
-            time_part = parts[-2] if len(parts) >= 2 else "12:00"
-            try:
-                frame_h = int(time_part.split(":")[0])
-            except (ValueError, IndexError):
-                frame_h = 12
-
-            best_h = min(sounding_map, key=lambda h: abs(h - frame_h))
-            if best_h != state["shown_hour"] and best_h in hodo_map:
-                state["shown_hour"] = best_h
-                return (frame_out, sounding_map[best_h], hodo_map[best_h],
-                        f"Sounding time: {best_h:02d}:00 UTC")
-
-        return (frame_out, skip, skip, skip)
+        upd = sounding_update(labels[idx]) if idx < len(labels) else {}
+        return (frame_out, upd.get("sounding", skip), upd.get("hodo", skip),
+                upd.get("synoptic_label", skip))
 
     def export_animation(fmt):
         """Write the composed satellite frames as an animated WebP or GIF for download."""

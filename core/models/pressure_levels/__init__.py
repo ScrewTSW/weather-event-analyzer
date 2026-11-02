@@ -1,2 +1,3 @@
 from core.models.pressure_levels.base import PressureLevelSnapshot, PressureLevelHourly
 from core.models.pressure_levels.openmeteo import OpenMeteoPressureSnapshot, OpenMeteoPressureHourly
+from core.models.pressure_levels.raob import RaobPressureHourly

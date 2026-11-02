@@ -517,13 +517,14 @@ class SPCClient:
         return self.fetch_tornado_reports("today")
 
     def _format_date(self, date: str) -> str:
-        """Format date string for SPC URLs (YYMMDD or 'today')."""
+        """Format date string for SPC URLs: 'today' -> today_torn.csv,
+        YYYY-MM-DD -> YYMMDD_rpts_torn.csv (past days live under the _rpts_ name)."""
         if date == "today":
             return "today"
         # Convert YYYY-MM-DD to YYMMDD
         try:
             dt = datetime.strptime(date, "%Y-%m-%d")
-            return dt.strftime("%y%m%d")
+            return dt.strftime("%y%m%d") + "_rpts"
         except ValueError:
             return date  # Return as-is if not in expected format
 

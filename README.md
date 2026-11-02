@@ -48,7 +48,8 @@ main.py                    # Entry point (--web, --host, --port, --cache-dir)
 
 | Source | Data | Rate Limit |
 |--------|------|-----------|
-| Open-Meteo | Surface weather, 19 pressure levels | 600/min, 10K/day |
+| Open-Meteo | Surface weather, 19 pressure levels (forecast, historical forecast, ERA5 archive) | 600/min, 10K/day |
+| IEM (Iowa Environmental Mesonet) | Archived radiosondes (RAOB), archived SPC MDs | Polite use |
 | NASA GIBS | Satellite tiles (GOES, Himawari, Meteosat, MODIS/VIIRS) | ~350K tiles/hr |
 | Nominatim | Geocoding | 1 req/sec |
 | NWS API | US weather alerts | ~every 30s |
@@ -58,6 +59,9 @@ main.py                    # Entry point (--web, --host, --port, --cache-dir)
 | IBTrACS | Tropical cyclone tracking | Polite use |
 | BOM | Australian warnings | Polite use |
 | ECCC | Canadian alerts (CAP-XML) | Polite use |
+
+Past dates fall back to archives — coverage, date ranges and resolution per source are in
+[docs/data-archives.md](docs/data-archives.md).
 
 ## Quick Start
 

@@ -17,6 +17,7 @@ class PressureLevelSnapshot(BaseDataResult):
     latitude: float | None = None
     longitude: float | None = None
     elevation: float | None = None  # surface height MSL (m); levels below it are extrapolated
+    station: str | None = None  # radiosonde site, when observed rather than modelled
 
     def cache_key(self) -> str:
         return f"json/pressure/{self.source}/{self.latitude}_{self.longitude}_{self.synoptic_time}.json"
@@ -34,6 +35,7 @@ class PressureLevelHourly(BaseDataResult):
     latitude: float | None = None
     longitude: float | None = None
     elevation: float | None = None  # surface height MSL (m); levels below it are extrapolated
+    station: str | None = None  # radiosonde site, when observed rather than modelled
 
     def cache_key(self) -> str:
         date = self.timestamps[0][:10] if self.timestamps else "unknown"

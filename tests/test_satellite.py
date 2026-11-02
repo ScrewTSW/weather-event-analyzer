@@ -30,8 +30,8 @@ class TestFetchEventResilience:
     @patch('core.api_request.requests.Session.get')
     def test_timed_out_frame_is_skipped_not_fatal(self, mock_get):
         timeout = requests.exceptions.ReadTimeout("Read timed out. (read timeout=30)")
-        # Frame 1 ok, frame 2 times out on every attempt, frame 3 ok
-        mock_get.side_effect = [_png_response(), timeout, timeout, _png_response()]
+        # Archive probe ok; frame 1 ok, frame 2 times out on every attempt, frame 3 ok
+        mock_get.side_effect = [_png_response(), _png_response(), timeout, timeout, _png_response()]
         logs = []
 
         frames = self.client.fetch_event(
@@ -44,17 +44,33 @@ class TestFetchEventResilience:
 
     @patch('core.api_request.requests.Session.get')
     def test_iter_frames_yields_before_fetching_the_rest(self, mock_get):
-        mock_get.side_effect = [_png_response(), _png_response(), _png_response()]
+        mock_get.side_effect = [_png_response() for _ in range(4)]
         source, timestamps = self.client.plan_event(
             lat=37.69, lon=-97.33, date="20261102", start_utc="1500", end_utc="1520",
             product="goes_east_geocolor", bbox_deg=20.0)
+        assert mock_get.call_count == 1  # one archive probe
 
         frames = self.client.iter_frames(source, timestamps, 37.69, -97.33, bbox_deg=20.0)
         first = next(frames)
 
         assert first.timestamp == "2026-11-02T15:00:00Z"
-        assert mock_get.call_count == 1  # the app can show frame 1 while 2..n download
+        assert mock_get.call_count == 2  # the app can show frame 1 while 2..n download
         assert [f.timestamp for f in frames] == ["2026-11-02T15:10:00Z", "2026-11-02T15:20:00Z"]
+
+
+    @patch('core.api_request.requests.Session.get')
+    def test_window_outside_archive_is_skipped_after_three_probes(self, mock_get):
+        black = io.BytesIO()
+        Image.new("RGBA", (512, 512)).save(black, format="PNG")  # GIBS: transparent outside its archive
+        mock_get.side_effect = [MagicMock(status_code=200, content=black.getvalue()) for _ in range(3)]
+        logs = []
+        _, timestamps = self.client.plan_event(
+            lat=33.21, lon=-87.57, date="20110427", start_utc="2100", end_utc="0000",
+            product="goes_east_geocolor", bbox_deg=20.0, on_progress=logs.append)
+
+        assert timestamps == []
+        assert mock_get.call_count == 3  # first/middle/last probe, no 2048 px fetches
+        assert any("outside the" in line for line in logs)
 
 
 class TestFetchBinaryRetry:

@@ -201,7 +201,8 @@ def fetch_openmeteo_gridded(lat, lon, date, hour=12, bbox_deg=10, step=2.0):
 
     from core.api_request import CachedRequest
     req = CachedRequest()
-    data = req.fetch_json(url)
+    # ERA5 multi-point queries take 5-30 s depending on server load
+    data = req.fetch_json(url, timeout=30 if in_forecast_window(date) else 90)
 
     target_time = f"{date}T{hour:02d}:00"
 
@@ -250,6 +251,9 @@ def fetch_openmeteo_gridded(lat, lon, date, hour=12, bbox_deg=10, step=2.0):
 
 
 def fetch_pressure_field(lat, lon, date, hour=12, bbox_deg=20, step=2.0):
+    from core.pressure_levels import in_forecast_window
+    if not in_forecast_window(date):
+        step = max(step, 4.0)  # ERA5 archive is slow per point — 441 points time out
     south = max(lat - bbox_deg, -90)
     north = min(lat + bbox_deg, 90)
     west = lon - bbox_deg
@@ -269,16 +273,25 @@ def fetch_pressure_field(lat, lon, date, hour=12, bbox_deg=20, step=2.0):
     lat_str = ",".join(f"{la:.2f}" for la in all_lats)
     lon_str = ",".join(f"{lo:.2f}" for lo in all_lons)
 
-    url = (
-        f"https://api.open-meteo.com/v1/forecast?"
-        f"latitude={lat_str}&longitude={lon_str}"
-        f"&hourly=pressure_msl"
-        f"&past_days=7&wind_speed_unit=ms"
-    )
+    if in_forecast_window(date):
+        url = (
+            f"https://api.open-meteo.com/v1/forecast?"
+            f"latitude={lat_str}&longitude={lon_str}"
+            f"&hourly=pressure_msl"
+            f"&past_days=7&wind_speed_unit=ms"
+        )
+    else:
+        # ERA5 reanalysis — MSLP back to 1940
+        url = (
+            f"https://archive-api.open-meteo.com/v1/archive?"
+            f"latitude={lat_str}&longitude={lon_str}"
+            f"&hourly=pressure_msl&start_date={date}&end_date={date}"
+        )
 
     from core.api_request import CachedRequest
     req = CachedRequest()
-    data = req.fetch_json(url)
+    # ERA5 multi-point queries take 5-30 s depending on server load
+    data = req.fetch_json(url, timeout=30 if in_forecast_window(date) else 90)
 
     target_time = f"{date}T{hour:02d}:00"
     points = data if isinstance(data, list) else [data]

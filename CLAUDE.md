@@ -104,6 +104,20 @@ Probing:
 
 Error handler preserves accumulated state — charts stay visible if a later stage crashes.
 
+Soundings render on demand: only the hour nearest the window start, then the hour nearest each
+streamed frame (`render_sounding`/`render_hodo`, cached per hour, one `render_lock` for pyplot).
+Hours are counted from 00 UTC on the event date, so a next-day 00 UTC RAOB is hour 24.
+
+### Historical dates
+
+Each client falls back to an archive when the date is outside the live window — see
+`docs/data-archives.md` for ranges/resolution, and update it when a source is checked.
+- Pressure levels: forecast (±7 d) → historical forecast (~2021+) → nearest IEM RAOB (N. America)
+- MDs/outlook: IEM point MD archive (2003+) + SPC outlook archive when date ≠ today
+- MSLP extrema: ERA5 archive (4° grid, 90 s timeout); SPC reports: `YYMMDD_rpts_torn.csv`
+- Satellite: `plan_event` probes first/middle/last frame and returns no timestamps when the
+  window is outside the GIBS (~90 day) archive — no historical imagery source yet
+
 Progressive UI: `fetch_data` yields through `out()`/`step()`, which send only the outputs passed
 (everything else is `gr.skip()`) — never re-send charts or 2048 px frames on a progress tick.
 Outputs in `PENDING_OUTPUTS` carry the `wea-pending` class (CSS stopwatch) until their first

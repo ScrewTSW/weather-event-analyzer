@@ -92,3 +92,66 @@ class TestPressureLevelClientFetch:
         result = client.fetch_snapshot(45.0, -90.0, "2026-07-02", 12)
         assert result.source == "open-meteo-pressure"
         assert result.synoptic_time == "2026-07-02T12:00"
+
+
+class TestArchiveFallback:
+    """fetch_hourly: forecast (±7 d) -> historical forecast (2016+) -> IEM RAOB."""
+
+    def _client(self):
+        import tempfile
+        from core.cache import Cache
+        return PressureLevelClient(cache=Cache(tempfile.mkdtemp()))
+
+    def test_forecast_window(self):
+        from datetime import date
+        from core.pressure_levels import in_forecast_window
+        today = date(2026, 11, 2)
+        assert in_forecast_window("2026-10-26", today) and in_forecast_window("2026-11-09", today)
+        assert not in_forecast_window("2026-10-25", today)
+        assert not in_forecast_window("2011-04-27", today)
+
+    def test_interpolate_raob_log_p_and_no_extrapolation(self):
+        from core.pressure_levels import interpolate_raob
+        levels = [
+            {"pres": 1000.0, "hght": 100.0, "tmpc": None, "dwpc": None, "drct": None, "sknt": None},
+            {"pres": 900.0, "hght": 1000.0, "tmpc": 20.0, "dwpc": 10.0, "drct": 180.0, "sknt": 20.0},
+            {"pres": 800.0, "hght": 2000.0, "tmpc": 10.0, "dwpc": 0.0, "drct": 270.0, "sknt": 20.0},
+        ]
+        out = interpolate_raob(levels, targets=[1000, 900, 850, 800, 700])
+        assert out["temperature"][0] is None          # below the first valid temperature
+        assert out["temperature"][1] == 20.0 and out["temperature"][3] == 10.0
+        assert 14.0 < out["temperature"][2] < 16.0     # ln-p interpolation
+        assert out["temperature"][4] is None           # above burst height
+        assert out["geopotential_height"][0] == 100.0  # heights exist below ground
+        assert out["wind_speed"][1] == round(20 * 0.514444, 2)
+        assert out["wind_direction"][1] == 180.0
+
+    def test_old_date_falls_back_to_nearest_raob(self):
+        client = self._client()
+        stations = {"features": [
+            {"id": "_FAR", "geometry": {"coordinates": [-80.0, 40.0]},
+             "properties": {"archive_begin": "1950-01-01", "archive_end": None, "sname": "Far"}},
+            {"id": "KBMX", "geometry": {"coordinates": [-86.7, 33.17]},
+             "properties": {"archive_begin": "1950-01-01", "archive_end": None,
+                            "sname": "Birmingham", "elevation": 178.0}},
+            {"id": "_OLD", "geometry": {"coordinates": [-87.5, 33.2]},
+             "properties": {"archive_begin": "1950-01-01", "archive_end": "1990-01-01", "sname": "Closed"}},
+        ]}
+        profile = {"profiles": [{"profile": [
+            {"pres": 1000.0, "hght": 100.0, "tmpc": 25.0, "dwpc": 20.0, "drct": 180.0, "sknt": 10.0},
+            {"pres": 500.0, "hght": 5800.0, "tmpc": -10.0, "dwpc": -20.0, "drct": 240.0, "sknt": 50.0}]}]}
+        empty = {"profiles": []}
+
+        def fake_json(url, **kw):
+            if "historical-forecast" in url:
+                import requests
+                raise requests.HTTPError("400")  # before 2016
+            if "RAOB.geojson" in url:
+                return stations
+            return profile if ("1200" in url or "1800" in url) else empty
+
+        with patch.object(client.req, "fetch_json", side_effect=fake_json):
+            r = client.fetch_hourly(33.21, -87.57, "2011-04-27")
+        assert r.source == "iem-raob" and r.station == "KBMX Birmingham"
+        assert r.timestamps == ["2011-04-27T12:00", "2011-04-27T18:00"]
+        assert r.temperature[0][0] == 25.0 and len(r.temperature[0]) == len(r.pressure_levels)

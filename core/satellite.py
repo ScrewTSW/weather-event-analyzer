@@ -194,6 +194,15 @@ class SatelliteClient:
             if end_dt <= start_dt:
                 end_dt += timedelta(days=1)
             timestamps = source.generate_timestamps(start_dt, end_dt)
+            # Geostationary layers keep only recent months — check with cheap probes
+            # (first/middle/last) before fetching every 2048 px frame of an old event
+            probes = {timestamps[0], timestamps[len(timestamps) // 2], timestamps[-1]} if timestamps else set()
+            if probes and not any((img := self._probe_frame(source, ts, lat, lon, bbox_deg))
+                                  and self._has_content(img) for ts in sorted(probes)):
+                if on_progress:
+                    on_progress(f"No {source.name} imagery for {start_dt:%Y-%m-%d %H:%M}-"
+                                f"{end_dt:%H:%M} UTC — outside the {source.layer} archive")
+                return source, []
         else:
             latest = self.probe_latest(source, lat, lon, bbox_deg, on_progress)
             if not latest:

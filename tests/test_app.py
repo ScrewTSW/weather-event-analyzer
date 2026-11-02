@@ -10,7 +10,7 @@ from app import FETCH_OUTPUTS, PENDING_OUTPUTS
 from core.models.satellite.base import SatelliteFrame
 
 HOURS = ["2026-11-02T12:00", "2026-11-02T15:00", "2026-11-02T18:00"]
-FRAME_TS = ["2026-11-02T15:00:00Z", "2026-11-02T15:10:00Z", "2026-11-02T15:20:00Z"]
+FRAME_TS = ["2026-11-02T15:00:00Z", "2026-11-02T15:10:00Z", "2026-11-02T17:50:00Z"]
 
 
 def _client(**attrs):
@@ -45,7 +45,7 @@ def _run_fetch():
                        layer="x", bbox=(0, 1, 0, 1))
         for n, ts in enumerate(FRAME_TS))
 
-    profile_hourly = MagicMock(timestamps=HOURS)
+    profile_hourly = MagicMock(timestamps=HOURS, station=None)
     pressure = _client()
     pressure.fetch_hourly.return_value = profile_hourly
     atmo = _client()
@@ -117,11 +117,18 @@ class TestFetchDataStreaming:
                     first_seen.setdefault(name, n)
         assert len(set(first_seen.values())) == 5
 
-    def test_synoptic_sounding_renders_first(self):
+    def test_only_hours_the_frames_need_are_rendered(self):
         _, snapshots, *_ = _run_fetch()
-        # 15 UTC start snaps to 18 UTC (index 2); the other hours follow
-        assert snapshots[0] == 2
-        assert sorted(snapshots) == [0, 1, 2]
+        # Window start 15:00 -> 15 UTC (index 1) first; 17:50 frame -> 18 UTC (index 2).
+        # 12 UTC is never rendered; each hour renders sounding + hodo exactly once.
+        assert snapshots == [1, 1, 2, 2]
+
+    def test_sounding_follows_streamed_frames_when_hour_changes(self):
+        rows, *_ = _run_fetch()
+        sat = [i for i, v in enumerate(_column(rows, "image")) if not _is_skip(v)][1:]
+        sent = [not _is_skip(rows[i][FETCH_OUTPUTS.index("sounding")]) for i in sat]
+        assert sent == [False, False, True]
+        assert _sent(rows[sat[-1]][FETCH_OUTPUTS.index("synoptic_label")]) == "Sounding time: 18:00 UTC"
 
     def test_satellite_frames_stream_one_per_yield(self):
         rows, *_ = _run_fetch()
@@ -143,14 +150,15 @@ class TestFrameChangeDedup:
         assert _is_skip(on_frame_change(2)[0])
 
     def test_scrubbing_sends_frame_and_sounding_only_when_hour_changes(self):
-        _, _, on_frame_change, _ = _run_fetch()
+        _, snapshots, on_frame_change, _ = _run_fetch()
         back = on_frame_change(0)
         assert not _is_skip(back[0])
         assert not _is_skip(back[1]) and not _is_skip(back[2])  # 18 UTC -> 15 UTC sounding
-        # Frames 0..2 are all 15 UTC — moving within the hour sends no sounding
+        # Frames 0 and 1 are both closest to 15 UTC — no sounding re-sent
         again = on_frame_change(1)
         assert not _is_skip(again[0])
         assert _is_skip(again[1]) and _is_skip(again[2])
+        assert snapshots == [1, 1, 2, 2]  # scrubbing reuses rendered soundings
 
 
 class TestExportAnimation:

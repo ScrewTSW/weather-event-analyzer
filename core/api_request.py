@@ -22,9 +22,14 @@ USER_AGENT = "WeatherEventAnalyzer/1.0 (https://github.com/ScrewTSW/weather-even
 #   NASA GIBS: ~350K tiles/hr — https://nasa-gibs.github.io/gibs-api-docs/access-advanced-topics/
 #   NWS: ~every 30s for alerts — https://weather-gov.github.io/api/general-faqs
 #   SPC/NOAA: general NWS limits — https://www.weather.gov/documentation/services-web-alerts
+#   Open-Meteo historical forecast: same terms as the forecast API — https://open-meteo.com/en/docs/historical-forecast-api
+#   IEM (Iowa Environmental Mesonet): no hard limit, asks for modest automated use —
+#     https://mesonet.agron.iastate.edu/api/  (RAOB + SPC MD archives)
 DOMAIN_RATE_LIMITS = {
     "api.open-meteo.com": 0.3,
     "archive-api.open-meteo.com": 0.3,
+    "historical-forecast-api.open-meteo.com": 0.3,
+    "mesonet.agron.iastate.edu": 0.5,
     "nominatim.openstreetmap.org": 1.0,
     "gibs.earthdata.nasa.gov": 0.05,
     "api.weather.gov": 0.5,
@@ -53,6 +58,8 @@ DEFAULT_RATE_LIMIT = 0.3
 DOMAIN_DAILY_LIMITS = {
     "api.open-meteo.com": 10000,
     "archive-api.open-meteo.com": 10000,
+    "historical-forecast-api.open-meteo.com": 10000,
+    "mesonet.agron.iastate.edu": 2000,
     "nominatim.openstreetmap.org": 2000,
     "gibs.earthdata.nasa.gov": None,
     "api.weather.gov": 5000,
@@ -158,7 +165,7 @@ class CachedRequest:
         return urlparse(url).hostname or ""
 
     def fetch_json(self, url: str, cache_key: str = None,
-                   ttl: int = 3600, params: dict = None) -> dict:
+                   ttl: int = 3600, params: dict = None, timeout: int = 30) -> dict:
         if cache_key and self.cache:
             cached = self.cache.get_json(cache_key, ttl=ttl)
             if cached is not None:
@@ -167,7 +174,7 @@ class CachedRequest:
 
         self._rate_limit(url)
         self.stats.record_api_call(self._domain(url))
-        resp = self.session.get(url, params=params, timeout=30)
+        resp = self.session.get(url, params=params, timeout=timeout)
         resp.raise_for_status()
         raw = resp.json()
 

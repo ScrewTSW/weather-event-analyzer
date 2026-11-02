@@ -1,8 +1,10 @@
 import html
 import logging
 import re
+from datetime import datetime, timedelta, timezone
 
 from core.models import Discussion
+from core.models.discussion import SPCMesoscaleDiscussion, SPCOutlook
 from core.api_request import CachedRequest
 
 from core.alerts import (
@@ -13,6 +15,19 @@ from core.alerts import (
 )
 
 logger = logging.getLogger(__name__)
+
+# Past dates: SPC products from their archives instead of the live pages
+IEM_MCD_URL = "https://mesonet.agron.iastate.edu/json/spcmcd.py?lat={lat:.3f}&lon={lon:.3f}"
+IEM_TEXT_URL = "https://mesonet.agron.iastate.edu/api/1/nwstext/{pid}"
+SPC_OUTLOOK_ARCHIVE_URL = ("https://www.spc.noaa.gov/products/outlook/archive/"
+                           "{year}/day1otlk_{ymd}_{hhmm}.html")
+SPC_OUTLOOK_ISSUANCES = ("1630", "1300", "2000")  # pre-event first; 2000 only as a fallback
+MAX_ARCHIVE_MDS = 8
+ARCHIVE_TTL = 7 * 86400  # past products never change
+
+
+def _is_today(date):
+    return not date or date == datetime.now(timezone.utc).strftime("%Y-%m-%d")
 
 
 def _clean_html(raw):
@@ -57,9 +72,10 @@ class MesoscaleDiscussionClient:
     def fetch(self, lat, lon, date):
         sources = select_sources(lat, lon)
         results = []
+        live = _is_today(date)
         dispatch = {
-            "spc_md": self._fetch_spc_md,
-            "spc_outlook": self._fetch_spc_outlook,
+            "spc_md": self._fetch_spc_md if live else lambda: self._fetch_spc_md_archive(lat, lon, date),
+            "spc_outlook": self._fetch_spc_outlook if live else lambda: self._fetch_spc_outlook_archive(date),
             "estofex": lambda: self._fetch_estofex(date),
             "eccc": self._fetch_eccc,
             "bom": self._fetch_bom,
@@ -117,6 +133,56 @@ class MesoscaleDiscussionClient:
 
         cached = self.req.fetch_or_compute("json/discussion/spc_outlook.json", _compute, ttl=3600)
         return [Discussion(**cached)] if cached else []
+
+    def _fetch_spc_md_archive(self, lat, lon, date):
+        """MDs whose area covered (lat, lon) during the SPC convective day of `date`.
+
+        IEM keeps every SPC MD polygon since 2003 and answers point queries; the
+        convective day runs 12 UTC -> 12 UTC, widened to start at 00 UTC.
+        """
+        raw = self.req.fetch_json(IEM_MCD_URL.format(lat=lat, lon=lon),
+                                  cache_key=f"json/discussion/iem_mcd/{lat:.3f}_{lon:.3f}.json",
+                                  ttl=86400)
+        day = datetime.fromisoformat(date)
+        start = day.strftime("%Y-%m-%dT%H:%M")
+        end = (day + timedelta(hours=36)).strftime("%Y-%m-%dT%H:%M")
+        mds = sorted((m for m in raw.get("mcds", [])
+                      if start <= (m.get("utc_issue") or "")[:16] < end),
+                     key=lambda m: m["utc_issue"])[:MAX_ARCHIVE_MDS]
+        results = []
+        for m in mds:
+            pid = m["product_id"]
+            text = self.req.fetch_text(IEM_TEXT_URL.format(pid=pid),
+                                       cache_key=f"json/discussion/iem_text/{pid}.json",
+                                       ttl=ARCHIVE_TTL)
+            areas = re.search(r"AREAS AFFECTED\.\.\.(.*?)\n\n", text, re.DOTALL | re.IGNORECASE)
+            results.append(SPCMesoscaleDiscussion(
+                source="spc_md", region="US",
+                title=f"SPC Mesoscale Discussion #{m['product_num']}",
+                text=text.strip()[:3000],
+                valid_from=m.get("utc_issue") or "", valid_to=m.get("utc_expire") or "",
+                url=m.get("spcurl") or "", md_number=m["product_num"],
+                areas_affected=areas.group(1).strip() if areas else "",
+            ))
+        return results
+
+    def _fetch_spc_outlook_archive(self, date):
+        ymd = date.replace("-", "")
+        for hhmm in SPC_OUTLOOK_ISSUANCES:
+            url = SPC_OUTLOOK_ARCHIVE_URL.format(year=ymd[:4], ymd=ymd, hhmm=hhmm)
+            try:
+                page = self.req.fetch_text(url, cache_key=f"json/discussion/spc_outlook/{ymd}_{hhmm}.json",
+                                           ttl=ARCHIVE_TTL)
+            except Exception:
+                continue
+            pre = re.search(r"<pre>(.*?)</pre>", page, re.DOTALL)
+            if not pre:
+                continue
+            outlook = SPCOutlook.parse(html.unescape(pre.group(1)).strip())
+            outlook.title = f"SPC Day 1 Convective Outlook ({date} {hhmm} UTC)"
+            outlook.url = url
+            return [outlook]
+        return []
 
     def _fetch_estofex(self, date=""):
         def _compute():
