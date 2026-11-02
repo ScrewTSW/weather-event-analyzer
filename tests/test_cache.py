@@ -71,3 +71,19 @@ class TestCache:
         self.cache.store("a.bin", b"x" * 1000, source_url="url_a")
         self.cache.store("b.bin", b"y" * 2000, source_url="url_b")
         assert self.cache.total_size() == 3000
+
+    def test_store_enforces_the_size_limit(self):
+        big_data = b"x" * 400_000
+        for i in range(4):  # 1.6 MB into a 1 MB cache, no explicit enforce_limit()
+            self.cache.store(f"f{i}.bin", big_data, source_url="u")
+        assert self.cache.total_size() <= self.cache.max_size_bytes
+        assert self.cache.get("f0.bin") is None and self.cache.get("f3.bin") is not None
+
+    def test_daily_cleanup_schedules_across_month_end(self):
+        from datetime import datetime, timezone
+        from unittest.mock import patch
+        last_day = datetime(2026, 11, 30, 15, 0, tzinfo=timezone.utc)
+        with patch("core.cache.datetime") as dt, patch("core.cache.threading.Timer") as timer:
+            dt.now.return_value = last_day
+            self.cache._schedule_daily_cleanup()
+        assert timer.call_args.args[0] == 9 * 3600  # until 2026-12-01 00:00 UTC

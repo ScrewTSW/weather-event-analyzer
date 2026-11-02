@@ -28,6 +28,15 @@ KNOT_MS = 0.514444
 VARIABLES = ["temperature", "dew_point", "wind_speed", "wind_direction",
              "geopotential_height"]
 
+# Open-Meteo surface variable -> DTO field; Open-Meteo corrects them to the returned elevation
+SURFACE_VARIABLES = {
+    "surface_pressure": "surface_pressure",
+    "temperature_2m": "surface_temperature",
+    "dew_point_2m": "surface_dewpoint",
+    "wind_speed_10m": "surface_wind_speed",
+    "wind_direction_10m": "surface_wind_direction",
+}
+
 
 def snap_to_synoptic(hour: int) -> int:
     def circular_distance(h1, h2):
@@ -53,6 +62,8 @@ def extract_snapshot(hourly: PressureLevelHourly, idx: int) -> PressureLevelSnap
         longitude=hourly.longitude,
         elevation=hourly.elevation,
         station=hourly.station,
+        **{f: (getattr(hourly, f)[idx] if idx < len(getattr(hourly, f)) else None)
+           for f in SURFACE_VARIABLES.values()},
     )
 
 
@@ -74,11 +85,18 @@ def _haversine_km(lat1, lon1, lat2, lon2):
     return 6371 * 2 * math.asin(math.sqrt(a))
 
 
+def _wind_ms(row: dict) -> tuple[float | None, float | None]:
+    if row.get("sknt") is None or row.get("drct") is None:
+        return None, None
+    return round(row["sknt"] * KNOT_MS, 2), row["drct"]
+
+
 def interpolate_raob(levels: list[dict], targets=PRESSURE_LEVELS) -> dict:
     """Interpolate one IEM RAOB profile onto standard pressure levels (linear in ln p).
 
     Levels outside the observed range of a variable stay None, so nothing is
     extrapolated below ground or above burst height. Wind is interpolated as u/v.
+    The surface row (highest pressure with temperature and dewpoint) is kept as-is.
     """
     def column(key, rows):
         pts = sorted((math.log(r["pres"]), r[key]) for r in rows
@@ -101,21 +119,28 @@ def interpolate_raob(levels: list[dict], targets=PRESSURE_LEVELS) -> dict:
     speed = [None if a is None else round(math.hypot(a, b), 2) for a, b in zip(u, v)]
     direction = [None if a is None else round(math.degrees(math.atan2(-a, -b)) % 360, 1)
                  for a, b in zip(u, v)]
+    sfc = max((r for r in levels if r.get("pres") and r.get("tmpc") is not None
+               and r.get("dwpc") is not None), key=lambda r: r["pres"], default={})
+    sfc_speed, sfc_dir = _wind_ms(sfc)
     return dict(temperature=column("tmpc", levels), dewpoint=column("dwpc", levels),
                 geopotential_height=column("hght", levels),
-                wind_speed=speed, wind_direction=direction)
+                wind_speed=speed, wind_direction=direction,
+                surface_pressure=sfc.get("pres"), surface_temperature=sfc.get("tmpc"),
+                surface_dewpoint=sfc.get("dwpc"),
+                surface_wind_speed=sfc_speed, surface_wind_direction=sfc_dir)
 
 
 class PressureLevelClient:
     def __init__(self, cache=None):
         self.req = CachedRequest(cache=cache)
 
+    @staticmethod
+    def _hourly_params() -> str:
+        return ",".join([f"{var}_{level}hPa" for var in VARIABLES for level in PRESSURE_LEVELS]
+                        + list(SURFACE_VARIABLES))
+
     def _build_openmeteo_url(self, lat: float, lon: float) -> str:
-        params = []
-        for var in VARIABLES:
-            for level in PRESSURE_LEVELS:
-                params.append(f"{var}_{level}hPa")
-        hourly = ",".join(params)
+        hourly = self._hourly_params()
         return (
             f"https://api.open-meteo.com/v1/forecast?"
             f"latitude={lat}&longitude={lon}"
@@ -145,6 +170,9 @@ class PressureLevelClient:
                     for level in PRESSURE_LEVELS
                 ]
 
+            for var, key in SURFACE_VARIABLES.items():
+                var_data[key] = hourly.get(var, [None] * (idx + 1))[idx]
+
             return PressureLevelSnapshot(
                 source="open-meteo-pressure",
                 synoptic_time=timestamps[idx],
@@ -164,6 +192,8 @@ class PressureLevelClient:
                      for level in PRESSURE_LEVELS]
                     for t in range(n_times)
                 ]
+            for var, key in SURFACE_VARIABLES.items():
+                var_data[key] = list(hourly.get(var, [None] * n_times))
 
             return PressureLevelHourly(
                 source="open-meteo-pressure",
@@ -177,7 +207,7 @@ class PressureLevelClient:
 
     def fetch_snapshot(self, lat: float, lon: float, date: str, hour: int) -> PressureLevelSnapshot:
         synoptic = snap_to_synoptic(hour)
-        cache_key = f"json/pressure/snapshot/{lat}_{lon}_{date}_{synoptic}.json"
+        cache_key = f"json/pressure/snapshot/{lat}_{lon}_{date}_{synoptic}_sfc.json"
         url = self._build_openmeteo_url(lat, lon)
         raw = self.req.fetch_json(url, cache_key=cache_key, ttl=3600)
         return self._parse_response(raw, synoptic_hour=synoptic)
@@ -194,23 +224,22 @@ class PressureLevelClient:
             result = self.fetch_historical_hourly(lat, lon, date)
             if has_profile_data(result):
                 return result
-        except requests.HTTPError:  # 400 before the archive starts (2016)
+        except requests.RequestException:  # 400 before the archive starts (2016), timeouts
             result = PressureLevelHourly(source="open-meteo-historical",
                                          pressure_levels=list(PRESSURE_LEVELS))
         return self.fetch_raob_hourly(lat, lon, date) or result
 
     def _fetch_forecast_hourly(self, lat, lon, date):
-        cache_key = f"json/pressure/hourly/{lat}_{lon}_{date}.json"
+        cache_key = f"json/pressure/hourly/{lat}_{lon}_{date}_sfc.json"
         url = self._build_openmeteo_url(lat, lon)
         raw = self.req.fetch_json(url, cache_key=cache_key, ttl=3600)
         return self._only_date(self._parse_response(raw, synoptic_hour=None), date)
 
     def fetch_historical_hourly(self, lat: float, lon: float, date: str) -> PressureLevelHourly:
-        params = ",".join(f"{var}_{level}hPa" for var in VARIABLES for level in PRESSURE_LEVELS)
         url = (f"{HISTORICAL_FORECAST_URL}?latitude={lat}&longitude={lon}"
-               f"&hourly={params}&start_date={date}&end_date={date}&wind_speed_unit=ms")
+               f"&hourly={self._hourly_params()}&start_date={date}&end_date={date}&wind_speed_unit=ms")
         # Past model runs never change — cache for the full retention period
-        raw = self.req.fetch_json(url, cache_key=f"json/pressure/historical/{lat}_{lon}_{date}.json",
+        raw = self.req.fetch_json(url, cache_key=f"json/pressure/historical/{lat}_{lon}_{date}_sfc.json",
                                   ttl=7 * 86400)
         result = self._only_date(self._parse_response(raw, synoptic_hour=None), date)
         result.source = "open-meteo-historical"
@@ -271,7 +300,8 @@ class PressureLevelClient:
     def _only_date(result: PressureLevelHourly, date: str) -> PressureLevelHourly:
         keep = [i for i, ts in enumerate(result.timestamps) if ts.startswith(date)]
         result.timestamps = [result.timestamps[i] for i in keep]
-        for var in VARIABLES:
-            key = "dewpoint" if var == "dew_point" else var
-            setattr(result, key, [getattr(result, key)[i] for i in keep])
+        keys = [("dewpoint" if v == "dew_point" else v) for v in VARIABLES]
+        for key in keys + list(SURFACE_VARIABLES.values()):
+            values = getattr(result, key)
+            setattr(result, key, [values[i] if i < len(values) else None for i in keep])
         return result

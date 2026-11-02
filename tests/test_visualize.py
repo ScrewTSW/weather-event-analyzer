@@ -434,6 +434,57 @@ class TestThermoAboveGround:
         _, _, ground_rel = mpcalc.storm_relative_helicity(agl, u, v, depth=3000 * units.meter)
         assert _bunkers_srh(p, u, v, agl, 3000) != float(ground_rel.magnitude)
 
+    # Open-Meteo Wichita 2026-11-02T18:00: 959.1 hPa at 402 m, 2 m air warmer/moister than 950 hPa
+    SURFACE = dict(surface_pressure=959.1, surface_temperature=26.0, surface_dewpoint=20.0,
+                   surface_wind_speed=7.92, surface_wind_direction=176.0)
+
+    def _with_surface(self, profile):
+        for k, v in self.SURFACE.items():
+            setattr(profile, k, [v] if isinstance(profile, PressureLevelHourly) else v)
+        return profile
+
+    def test_profile_column_prepends_surface(self):
+        from core.visualize import _profile_column
+        col = _profile_column(self._with_surface(self._snapshot(poison=True)))
+        assert col.p[0] == 959.1 and col.t[0] == 26.0 and col.td[0] == 20.0
+        assert col.agl[0] == 0.0 and col.ws[0] == 7.92
+        assert col.p[1] == 950.0  # underground 1000/975 still dropped
+        assert np.all(np.diff(col.p) < 0) and np.all(np.diff(col.agl) > 0)
+
+    def test_profile_column_drops_levels_below_surface_pressure(self):
+        from core.visualize import _profile_column
+        snap = self._with_surface(self._snapshot(poison=False))
+        snap.surface_pressure = 945.0  # 950 hPa is above ground by height but below by pressure
+        col = _profile_column(snap)
+        assert col.p[0] == 945.0 and col.p[1] == 925.0
+
+    def test_profile_column_without_surface_starts_at_first_level(self):
+        from core.visualize import _profile_column
+        col = _profile_column(self._snapshot(poison=False))
+        assert col.p[0] == 950.0 and col.agl[0] == self.HGT[2] - 399.0
+
+    def test_sounding_parcel_starts_at_surface(self):
+        fig = create_sounding_chart(self._with_surface(self._snapshot(poison=False)))
+        parcel = next(l for l in fig.axes[0].lines if l.get_label() == 'Parcel')
+        y = np.asarray(getattr(parcel.get_ydata(), 'magnitude', parcel.get_ydata()), dtype=float)
+        x = np.asarray(getattr(parcel.get_xdata(), 'magnitude', parcel.get_xdata()), dtype=float)
+        assert y[0] == 959.1 and x[0] == 26.0
+
+    def test_sbcape_uses_surface_air(self):
+        def sbcape(fig):
+            return next(t for t in self._texts(fig) if t.startswith('SBCAPE'))
+        without = sbcape(create_sounding_chart(self._snapshot(poison=False)))
+        with_sfc = sbcape(create_sounding_chart(self._with_surface(self._snapshot(poison=False))))
+        assert without != with_sfc
+
+    def test_profile_cape_uses_surface_air(self):
+        def cape(hourly):
+            from core.models.atmosphere.base import AtmosphereData
+            data = AtmosphereData(source="test", timestamps=["2026-11-02T18:00"], variables={})
+            fig = create_atmosphere_chart(data, "cape_cin", profile_hourly=hourly)
+            return float(fig.axes[0].lines[0].get_ydata()[0])
+        assert cape(self._with_surface(self._hourly(poison=True))) > cape(self._hourly(poison=False))
+
     def test_srh_spans_same_hours_as_cape(self):
         from core.models.atmosphere.base import AtmosphereData, VariableTimeSeries
         week = [f"2026-11-0{d}T{h:02d}:00" for d in (1, 2, 3) for h in range(24)]

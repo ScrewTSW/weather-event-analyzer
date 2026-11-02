@@ -4,7 +4,7 @@ import sqlite3
 import sys
 import threading
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Optional
 
@@ -26,10 +26,12 @@ class Cache:
         self.cache_dir = Path(cache_dir)
         self.cache_dir.mkdir(parents=True, exist_ok=True)
         self.max_size_bytes = int(max_size_gb * 1024 * 1024 * 1024)
+        self._evict_lock = threading.Lock()
         self.db_path = self.cache_dir / "cache.db"
         self._init_db()
         self._migrate_manifest()
         self.cleanup()
+        self.enforce_limit()
         self._schedule_daily_cleanup()
 
     def _init_db(self):
@@ -86,6 +88,7 @@ class Cache:
                 "VALUES (?, ?, ?, ?, ?, ?)",
                 (key, key, source_url, len(data), time.time(), "binary")
             )
+        self.enforce_limit()
         return path
 
     def get(self, key: str) -> Optional[Path]:
@@ -113,6 +116,7 @@ class Cache:
                 (key, key, source_url, len(json_bytes), time.time(),
                  time.time(), etag, last_modified, "json", ttl)
             )
+        self.enforce_limit()
         return path
 
     def get_json(self, key: str, ttl: int = 3600) -> Any | None:
@@ -215,16 +219,18 @@ class Cache:
             row = conn.execute("SELECT SUM(size) FROM cache_entries").fetchone()
         return row[0] or 0
 
-    def enforce_limit(self):
+    def enforce_limit(self, target: float = 0.9):
+        """Evict the oldest entries once the cache exceeds `max_size_bytes`, down to
+        `target` of it — so a full cache is not trimmed again on every store."""
         if self.total_size() <= self.max_size_bytes:
             return
-        with self._conn() as conn:
+        with self._evict_lock, self._conn() as conn:
+            total = conn.execute("SELECT SUM(size) FROM cache_entries").fetchone()[0] or 0
             rows = conn.execute(
                 "SELECT key, file_path, size FROM cache_entries ORDER BY acquired ASC"
             ).fetchall()
-            removed = 0
             for key, file_path, size in rows:
-                if self.total_size() - removed <= self.max_size_bytes:
+                if total <= self.max_size_bytes * target:
                     break
                 path = self.cache_dir / file_path
                 if path.exists():
@@ -233,7 +239,7 @@ class Cache:
                     except OSError:
                         pass
                 conn.execute("DELETE FROM cache_entries WHERE key = ?", (key,))
-                removed += size or 0
+                total -= size or 0
 
     def _delete_entry(self, key: str):
         with self._conn() as conn:
@@ -251,13 +257,12 @@ class Cache:
 
     def _schedule_daily_cleanup(self):
         now = datetime.now(timezone.utc)
-        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0)
-        if midnight <= now:
-            midnight = midnight.replace(day=now.day + 1)
+        midnight = now.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
         delay = (midnight - now).total_seconds()
 
         def _run():
             self.cleanup()
+            self.enforce_limit()
             self._schedule_daily_cleanup()
 
         t = threading.Timer(delay, _run)

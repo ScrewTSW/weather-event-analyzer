@@ -4,7 +4,7 @@ Real-time severe weather analysis tool combining satellite imagery, atmospheric 
 
 ## Features
 
-- **Satellite Imagery** — GOES-East/West (geocolor + IR), Himawari, Meteosat, MODIS/VIIRS via NASA GIBS. 2048x2048 normalized output. Probe-based latest frame detection with content verification.
+- **Satellite Imagery** — GOES-East/West (geocolor + IR), Himawari, Meteosat, MODIS/VIIRS via NASA GIBS. 2048x2048 normalized output. Probe-based latest frame detection with content verification. Past events (2017+) loop GOES-16/17/18/19 from NOAA's S3 archive — 0.5 km true colour by day, Band 13 IR by night, blended across the terminator; older dates fall back to daily MODIS/VIIRS passes.
 - **Skew-T Log-P Sounding** — Temperature/dewpoint profiles with PCHIP interpolation, CAPE/CIN shading, wind barbs in knots, LCL/LFC/EL/SFC markers, 0°C/−20°C isotherms, SBCAPE/MLCAPE/MUCAPE
 - **Hodograph** — Height-colored wind trace (purple 0-0.5km through blue 9+km), Bunkers RM/LM/MW storm motion, wind barb column by pressure level in knots
 - **Helicity** — SRH 0-1km and 0-3km time series on the CAPE/CIN chart
@@ -51,6 +51,7 @@ main.py                    # Entry point (--web, --host, --port, --cache-dir)
 | Open-Meteo | Surface weather, 19 pressure levels (forecast, historical forecast, ERA5 archive) | 600/min, 10K/day |
 | IEM (Iowa Environmental Mesonet) | Archived radiosondes (RAOB), archived SPC MDs | Polite use |
 | NASA GIBS | Satellite tiles (GOES, Himawari, Meteosat, MODIS/VIIRS) | ~350K tiles/hr |
+| NOAA GOES on AWS (`noaa-goes16…19`) | Archived ABI bands 1-3 + 13 NetCDF (CONUS/PACUS, 2017+), partial HTTP Range reads | Open data, no published limit |
 | Nominatim | Geocoding | 1 req/sec |
 | NWS API | US weather alerts | ~every 30s |
 | SPC | Mesoscale discussions, storm reports | NWS limits |

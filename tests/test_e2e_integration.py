@@ -245,6 +245,35 @@ class TestSatelliteE2E:
             assert f.source != ""
             assert f.layer != ""
 
+    def test_old_event_loops_from_goes_archive(self):
+        """Mayfield 2021-12-11: past the GIBS window, so Band 13 IR from noaa-goes16."""
+        import tempfile
+        from core.satellite import SatelliteClient
+        from core.cache import Cache
+        client = SatelliteClient(Cache(tempfile.mkdtemp(), max_size_gb=0.1))
+        source, timestamps = client.plan_event(36.74, -88.64, "20211211", "0200", "0210",
+                                               "auto", bbox_deg=20.0)
+        assert source.source_type == "goes_s3" and source.archive.bucket == "noaa-goes16"
+        assert timestamps == ["2021-12-11T02:00:00Z", "2021-12-11T02:10:00Z"]
+        assert set(source.modes.values()) == {"night"}
+        frame = next(client.iter_frames(source, timestamps[:1], 36.74, -88.64, bbox_deg=20.0))
+        assert frame.image.size == (2048, 2048) and client._has_content(frame.image)
+        assert frame.source == "GOES-16 Band 13 IR (NOAA archive)"
+
+    def test_old_daytime_event_is_true_color(self):
+        """Oklahoma 2019-05-20 20Z: daylight, so C01-C03 true colour at 0.5 km."""
+        import tempfile
+        from core.satellite import SatelliteClient
+        from core.cache import Cache
+        client = SatelliteClient(Cache(tempfile.mkdtemp(), max_size_gb=0.1))
+        source, timestamps = client.plan_event(35.5, -97.5, "20190520", "2000", "2005",
+                                               "auto", bbox_deg=5.0)
+        assert source.source_type == "goes_s3" and timestamps == ["2019-05-20T20:00:00Z"]
+        assert source.modes[timestamps[0]] == "day"
+        frame = next(client.iter_frames(source, timestamps, 35.5, -97.5, bbox_deg=5.0))
+        assert frame.image.size == (2048, 2048) and client._has_content(frame.image)
+        assert frame.source == "GOES-16 True Color (NOAA archive)"
+
 
 class TestCachingE2E:
     """Verify caching: clean cache, fetch, assert cache grew, re-fetch, assert cache unchanged."""

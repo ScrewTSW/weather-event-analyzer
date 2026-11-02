@@ -18,6 +18,13 @@ class PressureLevelSnapshot(BaseDataResult):
     longitude: float | None = None
     elevation: float | None = None  # surface height MSL (m); levels below it are extrapolated
     station: str | None = None  # radiosonde site, when observed rather than modelled
+    # Surface level at `elevation`: 2 m temperature/dewpoint, 10 m wind. The parcel for
+    # SBCAPE starts here — the first standard level is often ~100 m above the ground
+    surface_pressure: float | None = None
+    surface_temperature: float | None = None
+    surface_dewpoint: float | None = None
+    surface_wind_speed: float | None = None
+    surface_wind_direction: float | None = None
 
     def cache_key(self) -> str:
         return f"json/pressure/{self.source}/{self.latitude}_{self.longitude}_{self.synoptic_time}.json"
@@ -36,6 +43,12 @@ class PressureLevelHourly(BaseDataResult):
     longitude: float | None = None
     elevation: float | None = None  # surface height MSL (m); levels below it are extrapolated
     station: str | None = None  # radiosonde site, when observed rather than modelled
+    # Surface level per timestamp — see PressureLevelSnapshot
+    surface_pressure: list[float | None] = field(default_factory=list)
+    surface_temperature: list[float | None] = field(default_factory=list)
+    surface_dewpoint: list[float | None] = field(default_factory=list)
+    surface_wind_speed: list[float | None] = field(default_factory=list)
+    surface_wind_direction: list[float | None] = field(default_factory=list)
 
     def cache_key(self) -> str:
         date = self.timestamps[0][:10] if self.timestamps else "unknown"

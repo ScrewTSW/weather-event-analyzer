@@ -151,3 +151,42 @@ def get_crop_bounds(lat: float, lon: float, bbox_deg: float, zoom: int, sat_lon:
     lower = max(rows) - tile_origin_y
 
     return max(0, left), max(0, upper), right, lower
+
+
+def goes_fixed_grid(lat, lon, sat_lon: float, h: float = 35786023.0,
+                    req: float = 6378137.0, rpol: float = 6356752.31414):
+    """GOES-R ABI fixed-grid scan angles (x, y) in radians for arrays of lat/lon (deg).
+
+    Sweep-angle axis x, as in the ABI L1b/L2 files (GOES-R PUG vol. 3, §4.2.8.1).
+    Points on the far side of the Earth come back as NaN.
+    """
+    import numpy as np
+    lat_r, dlon = np.radians(lat), np.radians(np.asarray(lon) - sat_lon)
+    phi_c = np.arctan((rpol ** 2 / req ** 2) * np.tan(lat_r))
+    e2 = (req ** 2 - rpol ** 2) / req ** 2
+    rc = rpol / np.sqrt(1 - e2 * np.cos(phi_c) ** 2)
+    H = h + req
+    sx = H - rc * np.cos(phi_c) * np.cos(dlon)
+    sy = -rc * np.cos(phi_c) * np.sin(dlon)
+    sz = rc * np.sin(phi_c)
+    visible = H * (H - sx) >= sy ** 2 + (req ** 2 / rpol ** 2) * sz ** 2
+    x = np.arcsin(-sy / np.sqrt(sx ** 2 + sy ** 2 + sz ** 2))
+    y = np.arctan(sz / sx)
+    return np.where(visible, x, np.nan), np.where(visible, y, np.nan)
+
+
+def solar_elevation(lat, lon, when):
+    """Solar elevation (deg) for arrays of lat/lon at UTC datetime `when`
+    (NOAA general solar position equations, ~0.1° accuracy)."""
+    import numpy as np
+    hour = when.hour + when.minute / 60 + when.second / 3600
+    g = 2 * math.pi / 365 * (when.timetuple().tm_yday - 1 + (hour - 12) / 24)
+    eqtime = 229.18 * (0.000075 + 0.001868 * math.cos(g) - 0.032077 * math.sin(g)
+                       - 0.014615 * math.cos(2 * g) - 0.040849 * math.sin(2 * g))
+    decl = (0.006918 - 0.399912 * math.cos(g) + 0.070257 * math.sin(g)
+            - 0.006758 * math.cos(2 * g) + 0.000907 * math.sin(2 * g)
+            - 0.002697 * math.cos(3 * g) + 0.00148 * math.sin(3 * g))
+    hour_angle = np.radians((hour * 60 + eqtime + 4 * np.asarray(lon)) / 4 - 180)
+    lat_r = np.radians(lat)
+    sin_el = np.sin(lat_r) * math.sin(decl) + np.cos(lat_r) * math.cos(decl) * np.cos(hour_angle)
+    return np.degrees(np.arcsin(np.clip(sin_el, -1, 1)))

@@ -25,6 +25,9 @@ USER_AGENT = "WeatherEventAnalyzer/1.0 (https://github.com/ScrewTSW/weather-even
 #   Open-Meteo historical forecast: same terms as the forecast API — https://open-meteo.com/en/docs/historical-forecast-api
 #   IEM (Iowa Environmental Mesonet): no hard limit, asks for modest automated use —
 #     https://mesonet.agron.iastate.edu/api/  (RAOB + SPC MD archives)
+#   NOAA GOES-16/17/18/19 on AWS Open Data (NODD): free, no published request limit —
+#     https://registry.opendata.aws/noaa-goes/  — read in 250x250 chunks via HTTP Range,
+#     ~10-90 small requests per frame; S3 serves thousands of requests/s per prefix
 DOMAIN_RATE_LIMITS = {
     "api.open-meteo.com": 0.3,
     "archive-api.open-meteo.com": 0.3,
@@ -51,6 +54,10 @@ DOMAIN_RATE_LIMITS = {
     "www.weathersa.co.za": 0.3,
     "xml.kishou.go.jp": 0.3,
     "severeweather.wmo.int": 0.3,
+    "noaa-goes16.s3.amazonaws.com": 0.02,
+    "noaa-goes17.s3.amazonaws.com": 0.02,
+    "noaa-goes18.s3.amazonaws.com": 0.02,
+    "noaa-goes19.s3.amazonaws.com": 0.02,
 }
 DEFAULT_RATE_LIMIT = 0.3
 
@@ -81,6 +88,10 @@ DOMAIN_DAILY_LIMITS = {
     "www.weathersa.co.za": 2000,
     "xml.kishou.go.jp": 2000,
     "severeweather.wmo.int": 2000,
+    "noaa-goes16.s3.amazonaws.com": 100000,
+    "noaa-goes17.s3.amazonaws.com": 100000,
+    "noaa-goes18.s3.amazonaws.com": 100000,
+    "noaa-goes19.s3.amazonaws.com": 100000,
 }
 DEFAULT_DAILY_LIMIT = 5000
 
@@ -210,6 +221,17 @@ class CachedRequest:
         self.stats.record_api_call(self._domain(url))
         return self.session.get(url, params=params, timeout=timeout)
 
+    def fetch_range(self, url: str, start: int, end: int, timeout: int = 30) -> bytes:
+        """Bytes [start, end) of a remote file via HTTP Range — uncached, for reading
+        only the needed blocks of a large archive file."""
+        self._rate_limit(url)
+        self.stats.record_api_call(self._domain(url))
+        resp = self.session.get(url, headers={"Range": f"bytes={start}-{end - 1}"}, timeout=timeout)
+        resp.raise_for_status()
+        if resp.status_code != 206 and len(resp.content) != end - start:
+            raise requests.HTTPError(f"Range {start}-{end - 1} not honoured ({resp.status_code})")
+        return resp.content
+
     def fetch_or_compute(self, cache_key: str, compute_fn: Callable[[], Any],
                          ttl: int = 3600) -> Any:
         """Cache arbitrary computed results. Use when the value requires
@@ -225,6 +247,22 @@ class CachedRequest:
         if cache_key and self.cache and result is not None:
             self.cache.store_json(cache_key, result, ttl=ttl)
 
+        return result
+
+    def fetch_or_compute_binary(self, cache_key: str,
+                                compute_fn: Callable[[], Optional[bytes]]) -> Optional[bytes]:
+        """Binary counterpart of fetch_or_compute — e.g. a frame rendered from a
+        large download that is not worth keeping itself."""
+        if cache_key and self.cache:
+            path = self.cache.get(cache_key)
+            if path:
+                self.stats.record_cache_hit()
+                return path.read_bytes()
+
+        result = compute_fn()
+
+        if cache_key and self.cache and result:
+            self.cache.store(cache_key, result)
         return result
 
     def fetch_binary(self, url: str, cache_key: str = None) -> Optional[bytes]:

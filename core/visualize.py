@@ -12,6 +12,7 @@ matplotlib.use("Agg")  # Headless rendering
 import io
 import numpy as np
 from PIL import Image, ImageDraw, ImageFont
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 import matplotlib.pyplot as plt
@@ -28,6 +29,8 @@ except ImportError:
 import metpy.calc as mpcalc
 from metpy.plots import SkewT, Hodograph
 from metpy.units import units
+
+from core.pressure_levels import extract_snapshot
 
 
 def _get_font(size=12):
@@ -434,6 +437,55 @@ def _above_ground(heights_m, elevation):
     return np.isfinite(h) & (h >= sfc), sfc
 
 
+@dataclass
+class _Column:
+    """One sounding, bottom first, above ground only. Wind/temperature may hold NaN."""
+    p: np.ndarray
+    t: np.ndarray
+    td: np.ndarray
+    ws: np.ndarray
+    wd: np.ndarray
+    agl: np.ndarray   # m above the surface; NaN when the profile has no heights
+    sfc_hgt: float    # surface height MSL (m)
+
+
+def _profile_column(profile) -> _Column:
+    """Above-ground levels with the surface level (2 m T/Td, 10 m wind) prepended.
+
+    The first standard level above the terrain is often ~100 m up (950 hPa at
+    Wichita); a parcel lifted from there is not surface-based. When the profile
+    carries a surface pressure, levels at or below it are dropped as well, so
+    the column stays monotonic even where the model terrain differs from the DEM.
+    """
+    def arr(values):
+        return np.array([np.nan if v is None else v for v in values], dtype=float)
+
+    p = arr(profile.pressure_levels)
+    t, td = arr(profile.temperature), arr(profile.dewpoint)
+    ws, wd = arr(profile.wind_speed), arr(profile.wind_direction)
+    h = arr(profile.geopotential_height)
+    if len(h) == len(p):
+        above, sfc_hgt = _above_ground(h, profile.elevation)
+    else:
+        above, sfc_hgt = np.ones(len(p), bool), profile.elevation or 0.0
+        h = np.full(len(p), np.nan)
+
+    psfc = getattr(profile, "surface_pressure", None)
+    tsfc = getattr(profile, "surface_temperature", None)
+    tdsfc = getattr(profile, "surface_dewpoint", None)
+    if None in (psfc, tsfc, tdsfc):
+        return _Column(p[above], t[above], td[above], ws[above], wd[above],
+                       h[above] - sfc_hgt, sfc_hgt)
+
+    above &= p < psfc - 1.0  # a level within 1 hPa (~10 m) of the surface adds nothing
+    wsfc = [getattr(profile, "surface_wind_speed", None),
+            getattr(profile, "surface_wind_direction", None)]
+    ws_s, wd_s = (np.nan if v is None else v for v in wsfc)
+    return _Column(np.r_[psfc, p[above]], np.r_[tsfc, t[above]], np.r_[tdsfc, td[above]],
+                   np.r_[ws_s, ws[above]], np.r_[wd_s, wd[above]],
+                   np.r_[0.0, h[above] - sfc_hgt], sfc_hgt)
+
+
 def _bunkers_srh(pressure, u, v, agl, depth_m, bottom_m=0.0):
     """Storm-relative helicity (m²/s²) relative to the Bunkers right-mover."""
     rm, _, _ = mpcalc.bunkers_storm_motion(pressure, u, v, agl)
@@ -482,15 +534,11 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
             if profile_hourly is not None and profile_hourly.timestamps:
                 cape_vals = []
                 cin_vals = []
-                p_lvl = np.array(profile_hourly.pressure_levels, dtype=float)
                 for t_idx in range(len(profile_hourly.timestamps)):
                     try:
-                        above, _ = _above_ground(profile_hourly.geopotential_height[t_idx],
-                                                 profile_hourly.elevation)
-                        t_prof = np.array(profile_hourly.temperature[t_idx], dtype=float)[above] * units.degC
-                        td_prof = np.array(profile_hourly.dewpoint[t_idx], dtype=float)[above] * units.degC
+                        col = _profile_column(extract_snapshot(profile_hourly, t_idx))
                         sb_cape, sb_cin = mpcalc.surface_based_cape_cin(
-                            p_lvl[above] * units.hPa, t_prof, td_prof)
+                            col.p * units.hPa, col.t * units.degC, col.td * units.degC)
                         cape_vals.append(float(sb_cape.magnitude))
                         cin_vals.append(float(sb_cin.magnitude))
                     except Exception:
@@ -541,19 +589,17 @@ def create_atmosphere_chart(data, chart_type, profile_hourly=None):
             try:
                 srh_3km = []
                 srh_1km = []
-                p_levels = np.array(profile_hourly.pressure_levels, dtype=float)
                 # Same hours as CAPE/CIN — the pressure-level response spans
                 # ~2 weeks and would squash the 24 h CAPE trace into a sliver
                 cape_hours = set(timestamps)
                 srh_idx = [i for i, ts in enumerate(profile_hourly.timestamps) if ts in cape_hours]
                 for t_idx in srh_idx:
-                    ht = np.array(profile_hourly.geopotential_height[t_idx], dtype=float)
-                    above, sfc = _above_ground(ht, profile_hourly.elevation)
-                    ws = np.array(profile_hourly.wind_speed[t_idx], dtype=float)[above] * units('m/s')
-                    wd = np.array(profile_hourly.wind_direction[t_idx], dtype=float)[above] * units.degrees
-                    agl = (ht[above] - sfc) * units.meter
-                    p_t = p_levels[above] * units.hPa
-                    u_t, v_t = mpcalc.wind_components(ws, wd)
+                    col = _profile_column(extract_snapshot(profile_hourly, t_idx))
+                    ok = np.isfinite(col.ws) & np.isfinite(col.wd) & np.isfinite(col.agl)
+                    agl = col.agl[ok] * units.meter
+                    p_t = col.p[ok] * units.hPa
+                    u_t, v_t = mpcalc.wind_components(col.ws[ok] * units('m/s'),
+                                                      col.wd[ok] * units.degrees)
                     for depth, series in ((3000, srh_3km), (1000, srh_1km)):
                         try:
                             series.append(_bunkers_srh(p_t, u_t, v_t, agl, depth))
@@ -640,22 +686,11 @@ def create_sounding_chart(profile_data):
 
     from scipy.interpolate import PchipInterpolator
 
-    p_raw = np.array(profile_data.pressure_levels, dtype=float)
-    t_raw = np.array(profile_data.temperature, dtype=float)
-    td_raw = np.array(profile_data.dewpoint, dtype=float)
-    ws_raw = np.array(profile_data.wind_speed, dtype=float)
-    wd_raw = np.array(profile_data.wind_direction, dtype=float)
-    h_raw = np.array(profile_data.geopotential_height, dtype=float)
-
-    # The parcel starts at the lowest real level, not an extrapolated one
-    if len(h_raw) == len(p_raw):
-        above, sfc_hgt = _above_ground(h_raw, profile_data.elevation)
-        p_raw, t_raw, td_raw = p_raw[above], t_raw[above], td_raw[above]
-        ws_raw, wd_raw, h_raw = ws_raw[above], wd_raw[above], h_raw[above]
-    else:
-        sfc_hgt = profile_data.elevation or 0.0
-        h_raw = np.full(len(p_raw), np.nan)
-    agl_raw = h_raw - sfc_hgt
+    # The parcel starts at the surface (2 m) level when known, else the lowest real
+    # level — never an extrapolated underground one
+    col = _profile_column(profile_data)
+    p_raw, t_raw, td_raw, ws_raw, wd_raw = col.p, col.t, col.td, col.ws, col.wd
+    agl_raw, sfc_hgt = col.agl, col.sfc_hgt
 
     # Interpolate in log-pressure space; PCHIP preserves monotonicity
     # and avoids overshooting artifacts in dewpoint dry layers
@@ -893,24 +928,18 @@ def create_hodograph_chart(profile_data):
     """
     plt.style.use("dark_background")
 
-    pressure = np.array(profile_data.pressure_levels, dtype=float) * units.hPa
-    wind_speed = np.array(profile_data.wind_speed, dtype=float) * units('m/s')
-    wind_dir = np.array(profile_data.wind_direction, dtype=float) * units.degrees
-    heights = np.array(profile_data.geopotential_height, dtype=float) * units.meter
-
-    u, v = mpcalc.wind_components(wind_speed, wind_dir)
+    col = _profile_column(profile_data)
+    pressure = col.p * units.hPa
+    u, v = mpcalc.wind_components(col.ws * units('m/s'), col.wd * units.degrees)
     MS_TO_KT = 1.94384
     u_kt = u.magnitude * MS_TO_KT
     v_kt = v.magnitude * MS_TO_KT
 
-    # Heights AGL. Open-Meteo extrapolates levels below the surface (e.g.
-    # 1000/975 hPa at 399 m Wichita) — drop them. Cap at 12 km AGL so the
-    # hodograph and barb column show exactly the same levels.
+    # Heights AGL from the surface (10 m wind) up; underground levels are already
+    # dropped. Cap at 12 km AGL so the hodograph and barb column show the same levels.
     HODO_TOP_M = 12000
-    height_m = heights.magnitude
-    above, sfc_m = _above_ground(height_m, profile_data.elevation)
-    agl_m = height_m - sfc_m
-    keep = above & np.isfinite(u_kt) & np.isfinite(v_kt) & (agl_m <= HODO_TOP_M)
+    agl_m = col.agl
+    keep = np.isfinite(agl_m) & np.isfinite(u_kt) & np.isfinite(v_kt) & (agl_m <= HODO_TOP_M)
     agl_k, u_k, v_k = agl_m[keep], u_kt[keep], v_kt[keep]
 
     max_wind_kt = max(float(np.hypot(u_k, v_k).max()) if keep.any() else 0, 40)

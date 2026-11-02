@@ -1,5 +1,6 @@
 import io
 import math
+import re
 import numpy as np
 import requests
 from datetime import datetime, timedelta, timezone
@@ -10,8 +11,11 @@ from PIL import Image
 from core.cache import Cache
 from core.api_request import CachedRequest
 from core.models.satellite.base import SatelliteFrame
-from core.models.satellite.source import (DailyPolarSnapshot, SatelliteSource, SOURCES,
-                                          select_source)
+from core.goes_archive import DAY_ELEV, NIGHT_ELEV, render_frame
+from core.models.satellite.source import (DAY, NIGHT, TWILIGHT, DailyPolarSnapshot,
+                                          GOESArchiveImagery, S3Object, SatelliteSource,
+                                          SOURCES, goes_archives_for, select_source)
+from core.projection import goes_fixed_grid, solar_elevation
 
 GIBS_WMTS = "https://gibs.earthdata.nasa.gov/wmts/epsg4326/best"
 GIBS_WMS = "https://gibs.earthdata.nasa.gov/wms/epsg4326/best/wms.cgi"
@@ -30,6 +34,14 @@ def _gibs_wms_url(layer: str, time_str: str, bbox: tuple, width: int = 512, heig
         f"&WIDTH={width}&HEIGHT={height}&SRS=EPSG:4326"
         f"&TIME={time_str}"
     )
+
+
+GOES_FRAME_MATCH = timedelta(minutes=5)  # CONUS scans every 5 min in modes 3 and 6
+
+
+def _goes_scan_start(key: str) -> datetime | None:
+    m = re.search(r"_s(\d{13})", key)  # sYYYYJJJHHMMSS + tenths
+    return datetime.strptime(m.group(1), "%Y%j%H%M%S") if m else None
 
 
 def _eumetsat_wms_url(layer: str, bbox: tuple, width: int = 512, height: int = 512, time_str: str = None) -> str:
@@ -141,8 +153,23 @@ class SatelliteClient:
             pass
         return None
 
+    def _fetch_goes(self, source: GOESArchiveImagery, ts: str, lat: float, lon: float,
+                    bbox_deg: float, size: int) -> Optional[Image.Image]:
+        """Only the chunks under the frame are downloaded (uncached); the rendered
+        WebP is what gets cached."""
+        half = bbox_deg / 2
+        bbox = (lon - half, max(lat - half, -65.0), lon + half, min(lat + half, 65.0))
+        when = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+        cache_key = f"goes/{source.layer_for(ts)}/{ts.replace(':', '')}/" \
+                    f"{lat:.2f}_{lon:.2f}_{bbox_deg}_{size}.webp"
+        data = self.req.fetch_or_compute_binary(cache_key, lambda: render_frame(
+            self.req, source.archive.bucket, source.files[ts], bbox, size, when))
+        return Image.open(io.BytesIO(data)).convert("RGBA") if data else None
+
     def _fetch_frame(self, source: SatelliteSource, ts: str, lat: float, lon: float,
                      bbox_deg: float, zoom: int, size: int) -> Optional[Image.Image]:
+        if source.source_type == "goes_s3":
+            return self._fetch_goes(source, ts, lat, lon, bbox_deg, size)
         if source.source_type in ("gibs_wms", "eumetsat_wms"):
             return self._fetch_wms(source, ts, lat, lon, bbox_deg, size)
         else:
@@ -203,6 +230,10 @@ class SatelliteClient:
                 if on_progress:
                     on_progress(f"No {source.name} imagery for {start_dt:%Y-%m-%d %H:%M}-"
                                 f"{end_dt:%H:%M} UTC — outside the {source.layer} archive")
+                goes = self._plan_goes_archive(source, start_dt, end_dt, lat, lon, bbox_deg,
+                                               on_progress)
+                if goes:
+                    return goes
                 return self._plan_daily_polar(source, start_dt.date(), lat, lon, bbox_deg,
                                               on_progress)
         else:
@@ -223,6 +254,78 @@ class SatelliteClient:
                            bbox_deg: float) -> bool:
         img = self._probe_frame(source, ts, lat, lon, bbox_deg)
         return img is not None and self._has_content(img)
+
+    @staticmethod
+    def _sun_mode(lat: float, lon: float, bbox_deg: float, when: datetime) -> str:
+        """DAY if the sun is high over the whole frame, NIGHT if it is down everywhere."""
+        half = bbox_deg / 2
+        grid = np.linspace(-half, half, 5)
+        elev = solar_elevation(np.clip(lat + grid, -65, 65)[:, None], (lon + grid)[None, :], when)
+        if elev.min() >= DAY_ELEV:
+            return DAY
+        return NIGHT if elev.max() <= NIGHT_ELEV else TWILIGHT
+
+    def _plan_goes_archive(self, source: SatelliteSource, start_dt: datetime, end_dt: datetime,
+                           lat: float, lon: float, bbox_deg: float = 20.0, on_progress=None
+                           ) -> tuple[GOESArchiveImagery, list[str]] | None:
+        """Loop from NOAA's GOES-R bucket (2017+) when the location lies in the CONUS/PACUS
+        sector — listings only, no imagery, so it is a cheap check. True colour by day
+        unless the user picked an IR product."""
+        true_color = "geocolor" in source.name
+        for archive in goes_archives_for(start_dt.date(), source.name):
+            gx, gy = goes_fixed_grid(lat, lon, archive.sat_lon)
+            if not (archive.x_bounds[0] <= gx <= archive.x_bounds[1]
+                    and archive.y_bounds[0] <= gy <= archive.y_bounds[1]):
+                continue
+            goes = GOESArchiveImagery(archive, true_color=true_color)
+            wanted = goes.generate_timestamps(start_dt, end_dt)
+            scans: dict[datetime, dict[str, S3Object]] = {}
+            hour = start_dt.replace(minute=0)
+            while hour <= end_dt:
+                for start, files in self._goes_hour_scans(archive, hour).items():
+                    scans.setdefault(start, {}).update(files)
+                hour += timedelta(hours=1)
+            for ts in wanted:
+                t = datetime.strptime(ts, "%Y-%m-%dT%H:%M:%SZ")
+                ir_scans = [s for s in scans if "C13" in scans[s]]
+                nearest = min(ir_scans, key=lambda s: abs(s - t), default=None)
+                if nearest is None or abs(nearest - t) > GOES_FRAME_MATCH:
+                    continue
+                mode = self._sun_mode(lat, lon, bbox_deg, t) if true_color else NIGHT
+                if not all(b in scans[nearest] for b in goes.bands_for(mode)):
+                    mode = NIGHT  # visible bands missing for this scan
+                goes.modes[ts] = mode
+                goes.files[ts] = {b: scans[nearest][b] for b in goes.bands_for(mode)}
+            if goes.files:
+                if on_progress:
+                    counts = {m: list(goes.modes.values()).count(m) for m in (DAY, TWILIGHT, NIGHT)}
+                    on_progress(f"Using {goes.name}: {len(goes.files)}/{len(wanted)} frames — "
+                                f"{counts[DAY]} true colour, {counts[TWILIGHT]} blended, "
+                                f"{counts[NIGHT]} IR ({archive.bucket})")
+                return goes, sorted(goes.files)
+            if on_progress:
+                on_progress(f"No {archive.name} scans in {archive.bucket} for that window")
+        return None
+
+    def _goes_hour_scans(self, archive, hour: datetime) -> dict[datetime, dict[str, S3Object]]:
+        """{scan start: {band: object}} of every CONUS CMIP file in one UTC hour."""
+        prefix = f"{GOESArchiveImagery.PRODUCT}/{hour:%Y/%j/%H}/"
+        url = f"https://{archive.bucket}.s3.amazonaws.com/?list-type=2&prefix={prefix}"
+        settled = datetime.now(timezone.utc).replace(tzinfo=None) - hour > timedelta(days=1)
+        try:
+            xml = self.req.fetch_text(url, cache_key=f"json/satellite/goes_list/{archive.bucket}/"
+                                                     f"{hour:%Y%j%H}.json",
+                                      ttl=7 * 86400 if settled else 600)
+        except requests.RequestException:
+            return {}
+        scans: dict[datetime, dict[str, S3Object]] = {}
+        for entry in re.findall(r"<Contents>(.*?)</Contents>", xml, re.S):
+            key = re.search(r"<Key>([^<]*-M\d(C\d\d)_G\d\d_s\d+[^<]*\.nc)</Key>", entry)
+            size = re.search(r"<Size>(\d+)</Size>", entry)
+            start = key and _goes_scan_start(key.group(1))
+            if start and size:
+                scans.setdefault(start, {})[key.group(2)] = S3Object(key.group(1), int(size.group(1)))
+        return scans
 
     def _plan_daily_polar(self, fallback: SatelliteSource, day, lat: float, lon: float,
                           bbox_deg: float, on_progress=None) -> tuple[SatelliteSource, list[str]]:

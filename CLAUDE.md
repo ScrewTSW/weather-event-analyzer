@@ -116,7 +116,11 @@ Each client falls back to an archive when the date is outside the live window �
 - MDs/outlook: IEM point MD archive (2003+) + SPC outlook archive when date ≠ today
 - MSLP extrema: ERA5 archive (4° grid, 90 s timeout); SPC reports: `YYMMDD_rpts_torn.csv`
 - Satellite: `plan_event` probes first/middle/last frame; outside the geostationary archive
-  (GIBS ~90 days, EUMETSAT 502s) it falls back to `DailyPolarSnapshot` — one MODIS/VIIRS
+  (GIBS ~90 days, EUMETSAT 502s) it tries `GOESArchiveImagery` — CMIPC NetCDF from
+  `noaa-goes16…19` S3 (2017+, CONUS/PACUS sector only). Per frame by solar elevation
+  (`modes[ts]`): ≥8° true colour C01–C03 (0.5 km), ≤0° Band 13 IR, between blended.
+  `goes_archive.render_frame` reads only the HDF5 chunks under the box (`fetch_range`);
+  only the rendered WebP is cached — then `DailyPolarSnapshot`, one MODIS/VIIRS
   daily-mosaic frame per pass (2000+). Sources pick layer/name per timestamp via
   `layer_for(ts)` / `name_for(ts)` — use those, not `source.layer`, when building URLs
 

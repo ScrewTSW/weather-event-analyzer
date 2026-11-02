@@ -219,6 +219,84 @@ class DailyPolarSnapshot(SatelliteSource):
         return f"{self.passes[ts].name} (daily pass)"
 
 
+@dataclass(frozen=True)
+class GOESArchive:
+    """One GOES-R satellite at one position, as archived in NOAA's open-data bucket."""
+    name: str
+    bucket: str
+    side: str                          # "east" / "west" — which select_source products it serves
+    sat_lon: float
+    first_date: date
+    last_date: date | None             # None = still operational
+    x_bounds: tuple[float, float]      # CONUS/PACUS sector extent, scan angle (rad)
+    y_bounds: tuple[float, float]
+
+
+# Checked 2026-11-02 against bucket listings and x/y_image_bounds in the files. No files
+# exist while a satellite drifts between positions (G16 2017-12-01…12-13, G17 to 2018-11-12).
+_EAST_CONUS = ((-0.10136, 0.03864), (0.04424, 0.12824))
+_WEST_PACUS = ((-0.07, 0.07), (0.04424, 0.12824))
+GOES_ARCHIVES = (
+    GOESArchive("GOES-16", "noaa-goes16", "east", -89.5, date(2017, 2, 28), date(2017, 11, 30),
+                (-0.07504, 0.06496), (0.04256, 0.12656)),   # checkout position
+    GOESArchive("GOES-16", "noaa-goes16", "east", -75.0, date(2017, 12, 14), date(2025, 4, 7),
+                *_EAST_CONUS),
+    GOESArchive("GOES-19", "noaa-goes19", "east", -75.0, date(2025, 4, 7), None, *_EAST_CONUS),
+    GOESArchive("GOES-18", "noaa-goes18", "west", -137.0, date(2023, 1, 4), None, *_WEST_PACUS),
+    GOESArchive("GOES-17", "noaa-goes17", "west", -137.0, date(2018, 11, 13), date(2023, 1, 10),
+                *_WEST_PACUS),
+)
+
+
+@dataclass(frozen=True)
+class S3Object:
+    key: str
+    size: int
+
+
+# Per-frame rendering, chosen from the solar elevation over the frame
+DAY, TWILIGHT, NIGHT = "day", "twilight", "night"
+_MODE_BANDS = {DAY: ("C01", "C02", "C03"), TWILIGHT: ("C01", "C02", "C03", "C13"), NIGHT: ("C13",)}
+_MODE_LABEL = {DAY: ("TrueColor", "True Color"), TWILIGHT: ("TrueColor_IR", "True Color + IR"),
+               NIGHT: ("Band13_IR", "Band 13 IR")}
+
+
+class GOESArchiveImagery(SatelliteSource):
+    """ABI CONUS/PACUS sector imagery from NOAA's S3 bucket (2017+), the loop for events
+    older than the ~90 days GIBS keeps. Each frame is true colour (0.5 km) in daylight,
+    Band 13 IR at night, blended across the terminator — `modes` holds the choice per
+    timestamp, `files` the S3 objects of the scan used.
+    """
+
+    PRODUCT = "ABI-L2-CMIPC"
+
+    def __init__(self, archive: GOESArchive, true_color: bool = True):
+        super().__init__(name=f"{archive.name} (NOAA archive)", layer=f"{archive.name}_ABI",
+                         source_type="goes_s3", cadence_min=10, latency_min=0)
+        self.archive = archive
+        self.true_color = true_color
+        self.modes: dict[str, str] = {}
+        self.files: dict[str, dict[str, S3Object]] = {}
+
+    @staticmethod
+    def bands_for(mode: str) -> tuple[str, ...]:
+        return _MODE_BANDS[mode]
+
+    def layer_for(self, ts: str) -> str:
+        return f"{self.archive.name}_ABI_{_MODE_LABEL[self.modes[ts]][0]}"
+
+    def name_for(self, ts: str) -> str:
+        return f"{self.archive.name} {_MODE_LABEL[self.modes[ts]][1]} (NOAA archive)"
+
+
+def goes_archives_for(day: date, product: str) -> list[GOESArchive]:
+    """Archives that were imaging on `day`, the product's own side first."""
+    side = "west" if product.startswith("goes_west") else "east"
+    live = [a for a in GOES_ARCHIVES
+            if a.first_date <= day and (a.last_date is None or day <= a.last_date)]
+    return sorted(live, key=lambda a: a.side != side)
+
+
 SOURCES = {
     "goes_east": GOESEastIR(),
     "goes_west": GOESWestIR(),
