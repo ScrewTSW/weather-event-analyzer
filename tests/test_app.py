@@ -34,9 +34,11 @@ def _sent(v):
     return v
 
 
-def _run_fetch():
-    """Run fetch_data with every external dependency mocked; return yields + mocks."""
+def _run_fetch(args=("Wichita", "2026-11-02", "15:00", "15:20"), latest=None, mocks=None):
+    """Run fetch_data with every external dependency mocked; return yields + mocks.
+    `latest` is what the live-mode probe finds; `mocks` collects the client mocks."""
     sat = _client()
+    sat.probe_latest.return_value = latest
     source = MagicMock()
     sat.plan_event.return_value = (source, FRAME_TS)
     sat.iter_frames.side_effect = lambda *a, **k: iter(
@@ -52,6 +54,8 @@ def _run_fetch():
     atmo.fetch.return_value = MagicMock(source="open-meteo", timestamps=HOURS, variables={})
     disc = _client()
     disc.fetch.return_value = []
+    if mocks is not None:
+        mocks.update(sat=sat, atmo=atmo, pressure=pressure, disc=disc)
 
     def chart(kind):
         return lambda *a, **k: (kind, a, k)
@@ -76,7 +80,7 @@ def _run_fetch():
                return_value=Image.new("RGBA", (32, 32), (0, 0, 0, 0))):
         blocks = app_module.create_app(tempfile.mkdtemp())
         fns = {f.fn.__name__: f.fn for f in blocks.fns.values()}
-        rows = list(fns["fetch_data"]("Wichita", "2026-11-02", "15:00", "15:20", 2, "auto", False))
+        rows = list(fns["fetch_data"](*args, 2, "auto", False))
     return rows, snapshots, fns["on_frame_change"], fns["export_animation"]
 
 
@@ -173,3 +177,21 @@ class TestExportAnimation:
         *_, export_animation = _run_fetch()
         im = Image.open(export_animation("GIF (1024 px)")["value"])
         assert im.format == "GIF" and im.size == (1024, 1024) and im.n_frames == len(FRAME_TS)
+
+
+class TestLiveWindow:
+    def test_window_across_midnight_starts_on_the_previous_day(self):
+        """Latest frame 00:30 UTC -> window 21:30 the day before to 00:30, not 21:30 that
+        day to 00:30 the next (a window in the future: every probe empty)."""
+        mocks = {}
+        _run_fetch(args=("Wichita", "", "", ""), latest="2026-11-03T00:30:00Z", mocks=mocks)
+        kw = mocks["sat"].plan_event.call_args.kwargs
+        assert (kw["date"], kw["start_utc"], kw["end_utc"]) == ("20261102", "2130", "0030")
+        assert mocks["atmo"].fetch.call_args.args[2] == "2026-11-02"
+        assert mocks["pressure"].fetch_hourly.call_args.args[2] == "2026-11-02"
+
+    def test_window_within_one_day_keeps_its_date(self):
+        mocks = {}
+        _run_fetch(args=("Wichita", "", "", ""), latest="2026-11-03T18:30:00Z", mocks=mocks)
+        kw = mocks["sat"].plan_event.call_args.kwargs
+        assert (kw["date"], kw["start_utc"], kw["end_utc"]) == ("20261103", "1530", "1830")

@@ -282,13 +282,17 @@ def create_app(cache_dir: str = None, cache_max_gb: float = 5.0) -> gr.Blocks:
                 if latest:
                     from datetime import datetime as dt_parse
                     latest_dt = dt_parse.fromisoformat(latest.replace("Z", ""))
+                    start_dt = latest_dt - timedelta(hours=3)
                     end_utc = latest_dt.strftime("%H:%M")
-                    start_utc = (latest_dt - timedelta(hours=3)).strftime("%H:%M")
-                    date = latest_dt.strftime("%Y-%m-%d")
+                    start_utc = start_dt.strftime("%H:%M")
+                    # `date` is the day the window starts — plan_event rolls an end
+                    # earlier than the start over to the next day
+                    date = start_dt.strftime("%Y-%m-%d")
                     log(f"Latest frame: {latest} — window {start_utc}-{end_utc} UTC")
                 else:
                     start_utc = (now - timedelta(hours=3)).strftime("%H:%M")
                     end_utc = now.strftime("%H:%M")
+                    date = (now - timedelta(hours=3)).strftime("%Y-%m-%d")
                     log("Could not probe latest — using approximate time")
             else:
                 start_utc = start_utc or (now - timedelta(hours=2)).strftime("%H:%M")
